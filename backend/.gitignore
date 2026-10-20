@@ -1,0 +1,51 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Environment variables
+.env
+
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Uploaded files
+uploads/
+
+# Exports
+exports/
+
+# HuggingFace model cache (downloaded at runtime)
+*.bin
+*.safetensors
+*.onnx
+
+# Logs
+*.log
+
+# Coverage & testing
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Byte-compiled
+*.pyc
