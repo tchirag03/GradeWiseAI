@@ -21,11 +21,11 @@ async def connect_redis() -> None:
         )
         await _redis.ping()
         _available = True
-        print(f"[Redis] Connected → {settings.redis_host}:{settings.redis_port}")
+        print(f"[Redis] Connected -> {settings.redis_host}:{settings.redis_port}")
     except Exception as exc:
         _available = False
         _redis = None
-        print(f"[Redis] ⚠ Not available ({exc}). Caching & queue features disabled.")
+        print(f"[Redis] [WARN] Not available ({exc}). Caching & queue features disabled.")
 
 
 async def close_redis() -> None:

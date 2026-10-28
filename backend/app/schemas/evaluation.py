@@ -22,6 +22,9 @@ class EvaluationResponse(BaseModel):
     answer_type: str
     status: str = "draft"
     pipeline_stage: str | None = None
+    rubric_id: str | None = None
+    rubric_file: str | None = None
+    created_at: str | None = None
 
 
 class EvaluationListResponse(BaseModel):

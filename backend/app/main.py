@@ -2,6 +2,7 @@
 FastAPI application entry point.
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,21 +15,12 @@ from app.core.redis_client import connect_redis, close_redis
 from app.core.arq_pool import connect_arq_pool, close_arq_pool
 from app.db.queries.index_setup import ensure_indexes
 from app.db.services.queue_service import start_worker
-from app.services.ocr_service import init_ocr_service
-from app.services.structuring_service import init_structuring_service
-from app.services.slm_service import init_slm_service
-from app.services.stage0_preprocess import get_preprocessing_service
-from app.services.stage1_transcribe import get_transcription_service
-from app.services.stage2_describe import get_diagram_service
-from app.services.stage3_grade import get_grading_service
 from app.services.unified_vlm_service import get_unified_vlm_service
 
 from app.routers import (
     evaluations,
     sheets,
     ocr,
-    structuring,
-    slm,
     results,
     export,
     pipeline,
@@ -46,12 +38,8 @@ async def lifespan(app: FastAPI):
     await connect_arq_pool()
     await ensure_indexes()
 
-    # Initialise offline pipeline singletons
+    # Initialise offline unified VLM pipeline singleton
     get_unified_vlm_service()
-    get_preprocessing_service()
-    get_transcription_service()
-    get_diagram_service()
-    get_grading_service()
 
     worker_task = asyncio.create_task(start_worker())
     yield
@@ -76,21 +64,23 @@ app = FastAPI(
 # CORS middleware for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Ensure required directories exist before mounting
+os.makedirs(settings.upload_dir, exist_ok=True)
+os.makedirs(settings.log_dir, exist_ok=True)
+
 # Mount uploads directory for image inspection
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
-# ---------- Existing routers ----------
+# ---------- Active routers ----------
 app.include_router(evaluations.router, prefix=settings.api_prefix)
 app.include_router(sheets.router, prefix=settings.api_prefix)
 app.include_router(ocr.router, prefix=settings.api_prefix)
-app.include_router(structuring.router, prefix=settings.api_prefix)
-app.include_router(slm.router, prefix=settings.api_prefix)
 app.include_router(results.router, prefix=settings.api_prefix)
 app.include_router(export.router, prefix=settings.api_prefix)
 app.include_router(pipeline.router, prefix=settings.api_prefix)

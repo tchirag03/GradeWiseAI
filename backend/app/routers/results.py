@@ -2,13 +2,38 @@
 Results and feedback API routes.
 Aggregates real evaluation data from MongoDB.
 """
+from typing import Optional
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from app.core.mongodb import get_database
 from app.services.rubric_parser import parse_rubric_file, DEFAULT_FALLBACK_COMPONENTS
 
 router = APIRouter(tags=["Results"])
+
+
+class ResolveReviewRequest(BaseModel):
+    approved: bool = True
+    override_score: Optional[float] = Field(None, ge=0.0, description="Optional manual score override")
+    notes: Optional[str] = Field("Reviewed and confirmed by educator.", max_length=1000)
+
+
+def _calculate_grade(pct: float) -> str:
+    """Standard institutional grading scale."""
+    if pct >= 90:
+        return "A+"
+    if pct >= 80:
+        return "A"
+    if pct >= 70:
+        return "B+"
+    if pct >= 60:
+        return "B"
+    if pct >= 50:
+        return "C"
+    if pct >= 40:
+        return "D"
+    return "F"
 
 
 # ---------------------------------------------------------------------------
@@ -17,9 +42,10 @@ router = APIRouter(tags=["Results"])
 @router.get("/evaluations/{evaluation_id}/results")
 async def get_results_summary(evaluation_id: str):
     """Get aggregated results for an evaluation."""
-    db = get_database()
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
 
-    # Validate evaluation
+    db = get_database()
     evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
     if not evaluation:
         raise HTTPException(status_code=404, detail="Evaluation not found")
@@ -29,20 +55,20 @@ async def get_results_summary(evaluation_id: str):
         {
             "$match": {
                 "evaluation_id": evaluation_id,
-                "status": {"$in": ["evaluation-completed", "review-needed"]},
-                "evaluation_result": {"$exists": True},
+                "status": {"$in": ["evaluation-completed", "review-needed", "failed"]},
             }
         },
         {
             "$project": {
                 "student_name": {"$ifNull": ["$student_name", "Unknown"]},
                 "file_name": 1,
-                "total_score": "$evaluation_result.total_score",
-                "max_score": "$evaluation_result.max_score",
-                "percentage": "$evaluation_result.percentage",
-                "grade": "$evaluation_result.grade",
+                "total_score": {"$ifNull": ["$evaluation_result.total_score", "$total_score", 0.0]},
+                "max_score": {"$ifNull": ["$evaluation_result.max_score", "$max_score", float(evaluation.get("max_marks", 100))]},
+                "percentage": {"$ifNull": ["$evaluation_result.percentage", 0.0]},
+                "grade": {"$ifNull": ["$evaluation_result.grade", "F"]},
                 "questions": "$evaluation_result.questions",
                 "status": 1,
+                "error": 1,
                 "needs_human_review": 1,
                 "review_reasons": 1,
             }
@@ -72,29 +98,29 @@ async def get_results_summary(evaluation_id: str):
     # Stringify _id for JSON serialisation and compute fields
     for r in results:
         r["_id"] = str(r["_id"])
-        
-        qs = r.get("questions", [])
+
+        qs = r.get("questions") or []
         top_loss_component = None
         max_loss = -1.0
         feedback_summary = ""
         eval_method = "model"
-        
+
         for q in qs:
             if not feedback_summary and q.get("feedback"):
                 feedback_summary = q["feedback"][:120]
             if q.get("evaluation_method") == "fallback":
                 eval_method = "fallback"
-            
+
             for comp in q.get("component_scores", []):
                 loss = comp.get("max_marks", 0) - comp.get("marks_awarded", 0)
                 if loss > max_loss:
                     max_loss = loss
                     top_loss_component = f"{comp.get('component', 'Unknown')} (-{loss})"
-                    
+
         r["top_loss_component"] = top_loss_component
         r["feedback_summary"] = feedback_summary
         r["evaluation_method"] = eval_method
-        
+
         r.pop("questions", None)
 
     return {
@@ -102,10 +128,10 @@ async def get_results_summary(evaluation_id: str):
         "evaluation_id": evaluation_id,
         "summary": {
             "total_students": len(results),
-            "average_score": round(sum(scores) / len(scores), 1),
-            "highest_score": round(max(scores), 1),
-            "lowest_score": round(min(scores), 1),
-            "average_percentage": round(sum(percentages) / len(percentages), 1),
+            "average_score": round(sum(scores) / len(scores), 1) if scores else 0.0,
+            "highest_score": round(max(scores), 1) if scores else 0.0,
+            "lowest_score": round(min(scores), 1) if scores else 0.0,
+            "average_percentage": round(sum(percentages) / len(percentages), 1) if percentages else 0.0,
         },
         "results": results,
     }
@@ -117,8 +143,10 @@ async def get_results_summary(evaluation_id: str):
 @router.get("/evaluations/{evaluation_id}/results/{sheet_id}")
 async def get_detailed_result(evaluation_id: str, sheet_id: str):
     """Get detailed per-question breakdown for a sheet."""
-    db = get_database()
+    if not ObjectId.is_valid(evaluation_id) or not ObjectId.is_valid(sheet_id):
+        raise HTTPException(status_code=400, detail="Invalid ID format")
 
+    db = get_database()
     doc = await db.sheets.find_one(
         {"_id": ObjectId(sheet_id), "evaluation_id": evaluation_id}
     )
@@ -135,7 +163,7 @@ async def get_detailed_result(evaluation_id: str, sheet_id: str):
         }
 
     evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
-    
+
     # 1. Fetch rubric attached to this evaluation (by evaluation_id or rubric_id)
     rubric_doc = await db.rubrics.find_one({"evaluation_id": evaluation_id})
     if not rubric_doc and evaluation and evaluation.get("rubric_id"):
@@ -218,6 +246,8 @@ async def get_detailed_result(evaluation_id: str, sheet_id: str):
         "diagram_description": doc.get("diagram_descriptions", ""),
         "evaluation": eval_result,
         "crops": doc.get("crops", []),
+        "status": doc.get("status", "unknown"),
+        "error": doc.get("error"),
         "rubric_file_name": rubric_file_name,
         "rubric_components": rubric_components,
         "grade_boundaries": boundaries_list,
@@ -234,6 +264,9 @@ async def get_detailed_result(evaluation_id: str, sheet_id: str):
 @router.get("/evaluations/{evaluation_id}/review_queue")
 async def get_review_queue(evaluation_id: str):
     """Get all sheets flagged for human review."""
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
+
     db = get_database()
     cursor = db.sheets.find({
         "evaluation_id": evaluation_id,
@@ -247,7 +280,7 @@ async def get_review_queue(evaluation_id: str):
             "file_name": doc.get("file_name"),
             "student_name": doc.get("student_name", "Unknown"),
             "review_reasons": doc.get("review_reasons", []),
-            "total_score": doc.get("evaluation_result", {}).get("total_score"),
+            "total_score": doc.get("evaluation_result", {}).get("total_score", doc.get("total_score")),
             "percentage": doc.get("evaluation_result", {}).get("percentage"),
             "grade": doc.get("evaluation_result", {}).get("grade"),
             "evaluation_result": doc.get("evaluation_result"),
@@ -262,27 +295,47 @@ async def get_review_queue(evaluation_id: str):
 
 
 @router.post("/evaluations/{evaluation_id}/review_queue/{sheet_id}/resolve")
-async def resolve_review(evaluation_id: str, sheet_id: str, payload: dict):
+async def resolve_review(evaluation_id: str, sheet_id: str, payload: ResolveReviewRequest):
     """
     Allows a human evaluator to override or approve a flagged grading.
     payload: {"approved": bool, "override_score": Optional[float], "notes": str}
     """
+    if not ObjectId.is_valid(evaluation_id) or not ObjectId.is_valid(sheet_id):
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
     db = get_database()
     sheet = await db.sheets.find_one({"_id": ObjectId(sheet_id), "evaluation_id": evaluation_id})
     if not sheet:
         raise HTTPException(status_code=404, detail="Sheet not found")
 
+    evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
+
     update_fields = {
         "needs_human_review": False,
         "status": "evaluation-completed",
-        "human_review_notes": payload.get("notes", "Reviewed and confirmed by educator."),
+        "human_review_notes": payload.notes or "Reviewed and confirmed by educator.",
     }
 
-    if "override_score" in payload and payload["override_score"] is not None:
-        eval_res = sheet.get("evaluation_result", {})
-        eval_res["total_score"] = float(payload["override_score"])
-        max_s = eval_res.get("max_score", 100)
-        eval_res["percentage"] = round((eval_res["total_score"] / max_s * 100), 1) if max_s > 0 else 0
+    if payload.override_score is not None:
+        eval_res = sheet.get("evaluation_result") or {}
+        max_s = float(
+            eval_res.get("max_score")
+            or sheet.get("max_score")
+            or (evaluation.get("max_marks", 100) if evaluation else 100)
+        )
+        if max_s <= 0:
+            max_s = 100.0
+
+        override_val = min(float(payload.override_score), max_s)
+        pct = round((override_val / max_s * 100), 1) if max_s > 0 else 0.0
+
+        eval_res["total_score"] = override_val
+        eval_res["max_score"] = max_s
+        eval_res["percentage"] = pct
+        eval_res["grade"] = _calculate_grade(pct)
+
+        update_fields["total_score"] = override_val
+        update_fields["max_score"] = max_s
         update_fields["evaluation_result"] = eval_res
 
     await db.sheets.update_one({"_id": ObjectId(sheet_id)}, {"$set": update_fields})

@@ -1,7 +1,7 @@
 """
 Rubric Document Parser Service.
 Extracts structured rubric components, marks, and model answers
-from uploaded rubric files (PDF, TXT) or raw strings.
+from uploaded rubric files (PDF, DOCX, TXT) or raw strings.
 """
 import os
 import re
@@ -28,61 +28,50 @@ KNOWN_TITLES = [
 
 DEFAULT_FALLBACK_COMPONENTS = [
     {
-        "name": "1. Problem understanding and graph modeling",
-        "marks": 1.0,
-        "model_answer": "States that cities are represented as nodes and train routes/costs as weighted edges",
+        "name": "Correctness & Methodology",
+        "marks": 5.0,
+        "model_answer": "Complete and theoretically sound solution with valid reasoning and calculations.",
     },
     {
-        "name": "2. Choice of algorithm",
-        "marks": 1.0,
-        "model_answer": "Correctly identifies Floyd-Warshall as an all-pairs shortest path approach",
-    },
-    {
-        "name": "3. Initialization of distance matrix",
-        "marks": 1.0,
-        "model_answer": "Distance matrix created properly, diagonal = 0, infinity elsewhere",
-    },
-    {
-        "name": "4. Conversion of train data into graph edges",
-        "marks": 2.0,
-        "model_answer": "Correct handling of train ranges (Li, Ri, Wi) into graph representation",
-    },
-    {
-        "name": "5. Floyd-Warshall recurrence relation",
-        "marks": 1.0,
-        "model_answer": "Correct formula used: D^(k)[i][j] = min(D^(k-1)[i][j], D^(k-1)[i][k] + D^(k-1)[k][j])",
-    },
-    {
-        "name": "6. Pseudocode correctness",
-        "marks": 2.0,
-        "model_answer": "Proper nested loops (k, i, j) and state distance update step",
-    },
-    {
-        "name": "7. Example execution/output",
-        "marks": 1.0,
-        "model_answer": "Shows state matrix evolution with meaningful trace",
-    },
-    {
-        "name": "8. Time complexity/space complexity",
-        "marks": 1.0,
-        "model_answer": "Mentions O(N^3) time and O(N^2) space with analytical rationale",
+        "name": "Clarity & Completeness",
+        "marks": 5.0,
+        "model_answer": "Clear presentation, accurate diagrams/pseudocode where applicable, and step-by-step breakdown.",
     },
 ]
 
 
 def parse_rubric_text(text: str) -> list[dict]:
     """Parse raw text from a rubric file into structured components."""
-    if not text:
+    if not text or not text.strip():
         return []
 
     raw_lines = [l.strip() for l in text.replace("\r", "").split("\n") if l.strip()]
     merged = []
 
-    for l in raw_lines:
-        if re.match(r"^\d+[\.\)]", l):
-            merged.append(l)
-        elif merged and not l.lower().startswith("total") and not l.lower().startswith("rubric") and not l.lower().startswith("component"):
-            merged[-1] += " " + l
+    # Check if numbered items exist
+    has_numbered = any(re.match(r"^\d+[\.\)]", l) for l in raw_lines)
+
+    if has_numbered:
+        for l in raw_lines:
+            if re.match(r"^\d+[\.\)]", l):
+                merged.append(l)
+            elif (
+                merged
+                and not l.lower().startswith("total")
+                and not l.lower().startswith("rubric")
+                and not l.lower().startswith("component")
+            ):
+                merged[-1] += " " + l
+    else:
+        # Fallback to lines/bullets/paragraphs
+        idx = 1
+        for l in raw_lines:
+            if l.lower().startswith("total") or l.lower().startswith("rubric:"):
+                continue
+            clean_l = re.sub(r"^[\*\-•\d\.\)]+\s*", "", l).strip()
+            if clean_l and len(clean_l) > 3:
+                merged.append(f"{idx}. {clean_l}")
+                idx += 1
 
     components = []
     for item in merged:
@@ -97,7 +86,6 @@ def parse_rubric_text(text: str) -> list[dict]:
         title = body
         content = body
 
-        # Try matching known titles or delimiters
         matched_kt = False
         for kt in KNOWN_TITLES:
             pattern = re.escape(kt).replace(r"\ ", r"\s+").replace("-", ".")
@@ -111,7 +99,6 @@ def parse_rubric_text(text: str) -> list[dict]:
                 break
 
         if not matched_kt:
-            # Check for colon or hyphen separator
             parts = re.split(r"[:\-–—]\s+", body, maxsplit=1)
             if len(parts) == 2:
                 title = parts[0].strip()
@@ -121,6 +108,14 @@ def parse_rubric_text(text: str) -> list[dict]:
             "name": f"{num_str} {title}" if not title.startswith(num_str) else title,
             "marks": marks,
             "model_answer": content,
+        })
+
+    # If parsing found text but matched zero patterns, provide a single synthesized component
+    if not components and raw_lines:
+        components.append({
+            "name": "1. Assessment Criteria",
+            "marks": 10.0,
+            "model_answer": "\n".join(raw_lines[:10]),
         })
 
     return components
@@ -141,6 +136,14 @@ def parse_rubric_file(file_path: str) -> list[dict]:
             text = "\n".join(p.get_textpage().get_text_range() for p in pdf)
         except Exception as e:
             print(f"[RubricParser] PDF extraction error: {e}")
+            return []
+    elif ext in (".docx", ".doc"):
+        try:
+            import docx
+            doc = docx.Document(file_path)
+            text = "\n".join(p.text for p in doc.paragraphs if p.text)
+        except Exception as e:
+            print(f"[RubricParser] Word doc extraction error: {e}")
             return []
     else:
         try:

@@ -1,7 +1,7 @@
 """
 Application configuration and settings.
 """
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -17,15 +17,30 @@ class Settings(BaseSettings):
     # File uploads
     upload_dir: str = "uploads"
 
-    # Redis
-    redis_host: str = "localhost"
+    # Redis (use 127.0.0.1 for explicit IPv4 on Windows)
+    redis_host: str = "127.0.0.1"
     redis_port: int = 6379
 
-    # Mistral OCR API
-    mistral_api_key: str = ""
+    # Ollama Unified VLM
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3-vl:8b"
 
-    class Config:
-        env_file = ".env"
+    # Logging
+    log_dir: str = "logs"
+
+    # Allowed CORS origins
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 settings = Settings()

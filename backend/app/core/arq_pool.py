@@ -23,10 +23,10 @@ async def connect_arq_pool():
         from arq.connections import create_pool, RedisSettings
         redis_settings = RedisSettings(host=settings.redis_host, port=settings.redis_port)
         _arq_pool = await create_pool(redis_settings)
-        print(f"[Arq] Connected to Redis queue pool → {settings.redis_host}:{settings.redis_port}")
+        print(f"[Arq] Connected to Redis queue pool -> {settings.redis_host}:{settings.redis_port}")
         return _arq_pool
     except Exception as exc:
-        print(f"[Arq] ⚠ Could not connect to Arq Redis pool ({exc}).")
+        print(f"[Arq] [WARN] Could not connect to Arq Redis pool ({exc}).")
         _arq_pool = None
         return None
 

@@ -4,6 +4,7 @@ Generates real CSV and PDF exports from evaluated sheet data.
 """
 import csv
 import io
+import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -15,14 +16,25 @@ from app.core.mongodb import get_database
 router = APIRouter(tags=["Export"])
 
 
+def _safe_filename(name: str, ext: str) -> str:
+    """Sanitize filename to prevent header injection."""
+    cleaned = re.sub(r"[^\w\s-]", "", name).strip()
+    cleaned = re.sub(r"[-\s]+", "_", cleaned)
+    if not cleaned:
+        cleaned = "evaluation_results"
+    return f"{cleaned}.{ext}"
+
+
 # ---------------------------------------------------------------------------
 # POST  /evaluations/{evaluation_id}/export/csv
 # ---------------------------------------------------------------------------
 @router.post("/evaluations/{evaluation_id}/export/csv")
 async def export_csv(evaluation_id: str, include_details: bool = False):
     """Export evaluation results as CSV."""
-    db = get_database()
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
 
+    db = get_database()
     evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
     if not evaluation:
         raise HTTPException(status_code=404, detail="Evaluation not found")
@@ -30,7 +42,7 @@ async def export_csv(evaluation_id: str, include_details: bool = False):
     sheets = await db.sheets.find(
         {
             "evaluation_id": evaluation_id,
-            "status": "evaluation-completed",
+            "status": {"$in": ["evaluation-completed", "review-needed"]},
             "evaluation_result": {"$exists": True},
         }
     ).to_list(length=None)
@@ -45,11 +57,13 @@ async def export_csv(evaluation_id: str, include_details: bool = False):
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # Gather dynamic headers if include_details
+    # Find max questions across ALL sheets
     max_qs = 0
     if include_details and sheets:
-        first_sheet = sheets[0]
-        max_qs = len(first_sheet.get("evaluation_result", {}).get("questions", []))
+        for s in sheets:
+            qs = s.get("evaluation_result", {}).get("questions", [])
+            if len(qs) > max_qs:
+                max_qs = len(qs)
 
     # Header row
     headers = [
@@ -61,7 +75,7 @@ async def export_csv(evaluation_id: str, include_details: bool = False):
         "Grade",
         "Questions Evaluated",
     ]
-    
+
     if include_details:
         for i in range(1, max_qs + 1):
             headers.extend([f"Q{i} Score", f"Q{i} Feedback"])
@@ -74,13 +88,13 @@ async def export_csv(evaluation_id: str, include_details: bool = False):
         row = [
             sheet.get("student_name", "Unknown"),
             sheet.get("file_name", ""),
-            result.get("total_score", 0),
-            result.get("max_score", 0),
+            result.get("total_score", sheet.get("total_score", 0)),
+            result.get("max_score", sheet.get("max_score", 0)),
             result.get("percentage", 0),
             result.get("grade", "N/A"),
             len(result.get("questions", [])),
         ]
-        
+
         if include_details:
             qs = result.get("questions", [])
             overall_fb = []
@@ -95,12 +109,12 @@ async def export_csv(evaluation_id: str, include_details: bool = False):
                 else:
                     row.extend(["", ""])
             row.extend([" | ".join(overall_fb), eval_method])
-            
+
         writer.writerow(row)
 
     output.seek(0)
-    eval_name = evaluation.get("name", evaluation_id)
-    filename = f"{eval_name}_results.csv"
+    eval_name = evaluation.get("name") or evaluation_id
+    filename = _safe_filename(f"{eval_name}_results", "csv")
 
     return StreamingResponse(
         iter([output.getvalue()]),
@@ -118,8 +132,10 @@ async def export_pdf(evaluation_id: str, include_details: bool = False):
 
     Uses reportlab if available, otherwise returns a formatted text file.
     """
-    db = get_database()
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
 
+    db = get_database()
     evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
     if not evaluation:
         raise HTTPException(status_code=404, detail="Evaluation not found")
@@ -127,7 +143,7 @@ async def export_pdf(evaluation_id: str, include_details: bool = False):
     sheets = await db.sheets.find(
         {
             "evaluation_id": evaluation_id,
-            "status": "evaluation-completed",
+            "status": {"$in": ["evaluation-completed", "review-needed"]},
             "evaluation_result": {"$exists": True},
         }
     ).to_list(length=None)
@@ -178,8 +194,8 @@ def _generate_pdf(evaluation: dict, sheets: list[dict], include_details: bool = 
         r = s.get("evaluation_result", {})
         data.append([
             s.get("student_name", "Unknown"),
-            str(r.get("total_score", 0)),
-            str(r.get("max_score", 0)),
+            str(r.get("total_score", s.get("total_score", 0))),
+            str(r.get("max_score", s.get("max_score", 0))),
             f"{r.get('percentage', 0)}%",
             r.get("grade", "N/A"),
         ])
@@ -194,19 +210,19 @@ def _generate_pdf(evaluation: dict, sheets: list[dict], include_details: bool = 
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
     ]))
     elements.append(table)
-    
+
     if include_details:
         elements.append(PageBreak())
-        
+
         for s in sheets:
             r = s.get("evaluation_result", {})
             elements.append(Paragraph(f"<b>Student: {s.get('student_name', 'Unknown')}</b>", styles["Heading2"]))
             elements.append(Spacer(1, 4 * mm))
-            
+
             qs = r.get("questions", [])
             all_fb = []
             eval_method = "model"
-            
+
             data = [["Component", "Awarded", "Max", "Feedback"]]
             for q in qs:
                 all_fb.append(q.get("feedback", ""))
@@ -215,11 +231,11 @@ def _generate_pdf(evaluation: dict, sheets: list[dict], include_details: bool = 
                 for c in q.get("component_scores", []):
                     data.append([
                         f"Q{q.get('question_number', '?')}: {c.get('component', '')}",
-                        str(c.get('marks_awarded', 0)),
-                        str(c.get('max_marks', 0)),
+                        str(c.get("marks_awarded", 0)),
+                        str(c.get("max_marks", 0)),
                         c.get("feedback", ""),
                     ])
-                    
+
             table = Table(data, repeatRows=1)
             table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#374151")),
@@ -228,10 +244,10 @@ def _generate_pdf(evaluation: dict, sheets: list[dict], include_details: bool = 
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
             ]))
-            
+
             elements.append(table)
             elements.append(Spacer(1, 4 * mm))
-            
+
             elements.append(Paragraph(f"<b>Overall Feedback:</b> {' | '.join(all_fb)}", styles["Normal"]))
             elements.append(Spacer(1, 2 * mm))
             elements.append(Paragraph(f"<b>Evaluation Method:</b> {eval_method}", styles["Normal"]))
@@ -240,8 +256,7 @@ def _generate_pdf(evaluation: dict, sheets: list[dict], include_details: bool = 
     doc.build(elements)
     buf.seek(0)
 
-    eval_name_safe = eval_name.replace(" ", "_")
-    filename = f"{eval_name_safe}_results.pdf"
+    filename = _safe_filename(f"{eval_name}_results", "pdf")
 
     return StreamingResponse(
         buf,
@@ -267,23 +282,23 @@ def _generate_text_report(evaluation: dict, sheets: list[dict], include_details:
         r = s.get("evaluation_result", {})
         lines.append(
             f"{s.get('student_name', 'Unknown'):<25} "
-            f"{r.get('total_score', 0):>6.1f} "
-            f"{r.get('max_score', 0):>6.1f} "
+            f"{r.get('total_score', s.get('total_score', 0)):>6.1f} "
+            f"{r.get('max_score', s.get('max_score', 0)):>6.1f} "
             f"{r.get('percentage', 0):>6.1f}% "
             f"{r.get('grade', 'N/A'):>6}"
         )
-        
+
     if include_details:
         lines.append("\n\n" + "=" * 50)
         lines.append("  DETAILED RESULTS")
         lines.append("=" * 50 + "\n")
-        
+
         for s in sheets:
             r = s.get("evaluation_result", {})
             lines.append(f"Student: {s.get('student_name', 'Unknown')}")
             lines.append("-" * 55)
             lines.append(f"{'Component':<20} {'Awarded':>8} {'Max':>8}   {'Feedback'}")
-            
+
             qs = r.get("questions", [])
             all_fb = []
             eval_method = "model"
@@ -305,7 +320,7 @@ def _generate_text_report(evaluation: dict, sheets: list[dict], include_details:
             lines.append("\n")
 
     content = "\n".join(lines)
-    filename = f"{eval_name.replace(' ', '_')}_results.txt"
+    filename = _safe_filename(f"{eval_name}_results", "txt")
 
     return StreamingResponse(
         iter([content]),

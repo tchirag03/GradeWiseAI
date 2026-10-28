@@ -2,15 +2,15 @@
 Answer sheet schemas for upload and management.
 Matches the frontend contract defined in api/sheets.ts.
 """
-from datetime import datetime
 from typing import Literal
-
 from pydantic import BaseModel, Field
-
 
 # --- Status literal matching frontend + offline pipeline ---
 SheetStatus = Literal[
     "uploaded",
+    "processing",
+    "completed",
+    "failed",
     "preprocessing-pending",
     "preprocessing-processing",
     "preprocessing-completed",
@@ -42,9 +42,9 @@ CropType = Literal["text", "figure", "table", "math", "unknown"]
 
 
 class SheetCrop(BaseModel):
-    crop_id: str
+    crop_id: str = "crop_1"
     crop_type: CropType = "text"
-    crop_path: str
+    crop_path: str = ""
     bbox: list[int] = Field(default_factory=list, description="[ymin, xmin, ymax, xmax]")
     question_hint: str | None = None
     transcription: str | None = None
@@ -77,6 +77,7 @@ class SheetMetadata(BaseModel):
     crops: list[SheetCrop] = Field(default_factory=list)
     needs_human_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
+    error: str | None = None
 
 
 class ListSheetsResponse(BaseModel):
