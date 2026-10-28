@@ -160,6 +160,53 @@ async def start_pipeline(evaluation_id: str):
     )
 
 
+@router.post("/evaluations/{evaluation_id}/pipeline/reset")
+async def reset_pipeline(evaluation_id: str):
+    """
+    Manually resets an evaluation and its sheets back to draft status,
+    allowing a clean restart if interrupted or stuck.
+    """
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
+
+    db = get_database()
+    evaluation = await db.evaluations.find_one({"_id": ObjectId(evaluation_id)})
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+
+    await db.evaluations.update_one(
+        {"_id": ObjectId(evaluation_id)},
+        {
+            "$set": {
+                "status": "draft",
+                "pipeline_stage": "idle",
+                "error": None,
+            }
+        },
+    )
+
+    await db.sheets.update_many(
+        {"evaluation_id": evaluation_id},
+        {
+            "$set": {
+                "status": "uploaded",
+                "error": None,
+                "extracted_text": None,
+                "markdown_content": None,
+                "evaluation": None,
+                "marks": None,
+                "needs_human_review": False,
+            }
+        },
+    )
+
+    return {
+        "success": True,
+        "evaluation_id": evaluation_id,
+        "message": "Evaluation and sheets reset to draft state.",
+    }
+
+
 @router.get("/evaluations/{evaluation_id}/pipeline/status", response_model=PipelineStatusResponse)
 async def get_pipeline_status(evaluation_id: str):
     """

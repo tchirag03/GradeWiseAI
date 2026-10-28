@@ -335,6 +335,14 @@ export default function ProcessEvaluation() {
           setEvaluationStatus('processing')
           startPollingPipeline()
           startEventSource()
+        } else if (pipelineData.status === 'failed') {
+          setEvaluationStatus('error')
+          setError(
+            pipelineData.errors?.length
+              ? pipelineData.errors.join('\n')
+              : 'Previous run was interrupted or encountered errors.'
+          )
+          setStages((prev) => prev.map((st) => ({ ...st, status: 'error' })))
         } else {
           setEvaluationStatus('not-started')
         }
