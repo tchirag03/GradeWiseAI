@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.mongodb import get_database
 
 OLLAMA_URL = "http://127.0.0.1:11434"
-MODEL_NAME = "qwen-eval"
+MODEL_NAME = "gemma4:e4b"
 
 
 class UnifiedVLMService:
@@ -37,6 +37,8 @@ class UnifiedVLMService:
     def __init__(self):
         self.ollama_url = getattr(settings, "ollama_url", OLLAMA_URL)
         self.model_name = getattr(settings, "ollama_model", MODEL_NAME)
+        self.image_max_dim = getattr(settings, "image_max_dim", 768)
+        self.vlm_max_tokens = getattr(settings, "vlm_max_tokens", 8192)
         self._inference_lock = asyncio.Lock()
 
     def _get_detached_flags(self) -> int:
@@ -157,7 +159,7 @@ class UnifiedVLMService:
             f"  3. CWD: {cwd_path}"
         )
 
-    def prepare_image_b64(self, file_path: str, max_dim: int = 768) -> str:
+    def prepare_image_b64(self, file_path: str, max_dim: Optional[int] = None) -> str:
         """
         Normalize and compress image for optimal vision encoder throughput.
         Reduces vision tokens significantly while preserving handwriting legibility.
@@ -166,7 +168,8 @@ class UnifiedVLMService:
 
         with Image.open(resolved_path) as img:
             img = img.convert("RGB")
-            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            target_dim = max_dim if max_dim is not None else self.image_max_dim
+            img.thumbnail((target_dim, target_dim), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=80)
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -227,8 +230,74 @@ class UnifiedVLMService:
                 line += f"\n   Criteria: {bands}"
             rubric_lines.append(line)
 
+        comp_sum = sum(float(c.get("marks", 0)) for c in components if c.get("marks") is not None)
+        if comp_sum > 0:
+            max_marks = comp_sum
+
         rubric_text = "\n\n".join(rubric_lines)
         return rubric_text, components, max_marks, subject
+
+    @staticmethod
+    def _parse_json_safely(text: str) -> Optional[dict]:
+        """Robustly extracts and parses a JSON object with schema key verification."""
+        if not text:
+            return None
+        s = text.strip()
+
+        # Clean markdown codeblocks
+        if s.startswith("```"):
+            lines = s.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            s = "\n".join(lines).strip()
+
+        # Direct parse attempt
+        try:
+            d = json.loads(s)
+            if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                return d
+        except Exception:
+            pass
+
+        # Targeted extraction: locate start of target JSON by searching backwards for schema keys
+        target_keys = ['"rubric_breakdown"', '"transcription"', '"total_score"', '"student_name"']
+        for key in target_keys:
+            idx = s.rfind(key)
+            while idx != -1:
+                start_brace = s.rfind('{', 0, idx)
+                if start_brace != -1:
+                    candidate = s[start_brace:]
+                    end_brace = candidate.rfind('}')
+                    if end_brace != -1:
+                        chunk = candidate[:end_brace + 1]
+                        try:
+                            d = json.loads(chunk)
+                            if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                                return d
+                        except Exception:
+                            for extra in ["}", "\n}", "\n}\n}", '"}]}', '"}']:
+                                try:
+                                    d = json.loads(chunk + extra)
+                                    if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                                        return d
+                                except Exception:
+                                    pass
+                idx = s.rfind(key, 0, idx)
+
+        # Generic regex search for any balanced JSON object with target keys
+        import re
+        matches = list(re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', s))
+        for m in reversed(matches):
+            try:
+                d = json.loads(m.group(0))
+                if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                    return d
+            except Exception:
+                pass
+
+        return None
 
     @staticmethod
     def _calculate_grade(pct: float) -> str:
@@ -313,7 +382,7 @@ class UnifiedVLMService:
         )
 
         # Step 4: Encode image and call VLM
-        b64_img = self.prepare_image_b64(resolved_path, max_dim=640)
+        b64_img = self.prepare_image_b64(resolved_path, max_dim=self.image_max_dim)
         existing_student_name = sheet.get("student_name", "")
         logger.info("[Sheet %s] Step 4/5: Image encoded (%d bytes b64, ~%d KB). Sending to Ollama %s...",
                      sheet_id, len(b64_img), len(b64_img) * 3 // 4 // 1024, self.model_name)
@@ -427,33 +496,34 @@ class UnifiedVLMService:
         sheet_id: str = "",
     ) -> Dict[str, Any]:
         """Invokes local Qwen3-VL via Ollama with strict JSON enforcement."""
-        prompt = f"""You are an Expert University Professor and Automated Examination Assessment System for: {subject}.
-Analyze this handwritten student exam answer sheet image accurately against the rubric criteria.
+        prompt = f"""You are an Expert University Professor and Precision Academic Grading System for: {subject}.
+Evaluate this handwritten student examination answer sheet image accurately against the official rubric.
 
 ### OFFICIAL GRADING RUBRIC:
 {rubric_text}
 
-### INSTRUCTIONS:
-1. Identify the student name or USN if visible on the sheet. If not found or illegible, return an empty string.
-2. Provide a concise Markdown transcription of key formulas, answers, and steps (concise, max 120 words).
-3. If any hand-drawn diagram, graph, flowchart, or matrix is present, generate a brief structural description.
-4. Grade the answer strictly against the rubric criteria. Provide marks and brief 1-line rationale for each component.
-5. Calculate total awarded marks (between 0.0 and {max_marks}).
-6. If the score is borderline (near grade boundaries) or handwriting is ambiguous, set needs_human_review to true with reasons.
+### MANDATORY INSTRUCTIONS:
+1. Complete verbatim transcription of all handwritten text, formulas, steps, and pseudocode from top to bottom (do not summarize or condense).
+2. Grade every rubric component with marks awarded, exact student evidence quote, detailed explainability feedback, and expected answer.
+3. In "evaluator_rationale", provide an in-depth 3-5 sentence academic assessment summary explaining strengths, gaps, and exact justification for total score awarded.
+4. STRICT THINKING CONSTRAINT: Keep internal reasoning concise (under 100-150 words). Do not rewrite the prompt or transcribe the code in thinking. Quickly check criteria and immediately output the final JSON object.
 
 Return ONLY a valid JSON object matching this schema:
 {{
-  "student_name": "Student Name (or USN if visible, else empty string)",
-  "transcription": "Concise Markdown transcription",
-  "diagram_description": "Brief structural description (or empty string)",
+  "student_name": "Student Name (e.g. Nithin) or empty string",
+  "transcription": "Complete verbatim markdown transcription of the handwritten answer sheet from top to bottom, including all text, steps, and full pseudocode",
+  "diagram_description": "Structural description of hand-drawn diagrams, or empty string",
   "rubric_breakdown": [
     {{
-      "component": "Rubric component name",
-      "marks_awarded": 1.0,
-      "max_marks": 1.0,
-      "feedback": "Brief 1-line evaluation rationale"
+      "component": "Component name matching rubric",
+      "marks_awarded": 1.5,
+      "max_marks": 2.0,
+      "student_evidence": "Exact quote or line from the student script",
+      "feedback": "Detailed explainability rationale: what was demonstrated, what was missing, and deduction reasoning",
+      "model_answer": "Expected standard answer or criteria"
     }}
   ],
+  "evaluator_rationale": "Comprehensive academic assessment summary explaining strengths, gaps, and exact justification for total score awarded",
   "total_score": 0.0,
   "max_score": {max_marks},
   "percentage": 0.0,
@@ -466,11 +536,11 @@ Return ONLY a valid JSON object matching this schema:
             "model": self.model_name,
             "prompt": prompt,
             "images": [b64_img],
-            "format": "json",
             "options": {
                 "num_thread": 10,
-                "temperature": 0.1,
-                "num_predict": 2500,
+                "temperature": 0.6,
+                "num_ctx": 16384,
+                "num_predict": self.vlm_max_tokens,
             },
             "stream": False,
         }
@@ -527,29 +597,23 @@ Return ONLY a valid JSON object matching this schema:
         if thinking:
             _log("[Sheet %s]   Model reasoning completed (%d chars of chain-of-thought)", sheet_id, len(thinking))
 
-        if not raw_json and thinking:
-            import re
-            m = re.search(r"\{[\s\S]*\}", thinking)
-            if m:
-                raw_json = m.group(0)
-                _log("[Sheet %s]   Extracted JSON from thinking block (%d chars)", sheet_id, len(raw_json))
+        data = None
+        # 1. Attempt extraction from response body
+        if raw_json:
+            data = self._parse_json_safely(raw_json)
 
-        if not raw_json:
+        # 2. If response was empty or unparseable, search inside thinking block for schema JSON
+        if not data and thinking:
+            _log("[Sheet %s]   Searching for schema JSON inside thinking block (%d chars)...", sheet_id, len(thinking))
+            data = self._parse_json_safely(thinking)
+
+        if not data:
             if logger:
-                logger.error("[Sheet %s] Ollama returned EMPTY response body. Thinking length: %d chars",
-                             sheet_id, len(thinking))
-            raise RuntimeError("Ollama returned an empty response. The model may have exhausted its token limit during thinking.")
+                logger.error("[Sheet %s] Failed to extract valid schema JSON. Response: %d chars, Thinking: %d chars",
+                             sheet_id, len(raw_json), len(thinking))
+            raise RuntimeError("VLM response did not contain a valid JSON evaluation object. Please retry this sheet.")
 
-        _log("[Sheet %s]   Raw JSON response length: %d chars", sheet_id, len(raw_json))
-
-        try:
-            data = json.loads(raw_json)
-            _log("[Sheet %s]   JSON parsed successfully. Keys: %s", sheet_id, list(data.keys()))
-        except json.JSONDecodeError as exc:
-            if logger:
-                logger.error("[Sheet %s] VLM response is NOT valid JSON: %s\nFirst 500 chars: %s",
-                             sheet_id, str(exc), raw_json[:500])
-            raise RuntimeError(f"VLM response was not valid JSON ({exc}): {raw_json[:300]}")
+        _log("[Sheet %s]   JSON parsed successfully! Keys: %s", sheet_id, list(data.keys()))
 
         return self._format_vlm_output(
             data=data,
@@ -596,25 +660,39 @@ Return ONLY a valid JSON object matching this schema:
             review_reasons.append(f"Borderline score ({pct}%, within 2.5% of grade threshold)")
 
         rubric_breakdown = data.get("rubric_breakdown", [])
-        if not rubric_breakdown and rubric_components:
-            # Map default structure if breakdown was empty
+        formatted_breakdown = []
+        for comp in rubric_breakdown:
+            formatted_breakdown.append({
+                "component": comp.get("component") or comp.get("name") or "Criteria",
+                "marks_awarded": float(comp.get("marks_awarded", 0.0)),
+                "max_marks": float(comp.get("max_marks", 1.0)),
+                "feedback": comp.get("feedback") or "Graded against rubric criteria.",
+                "student_evidence": comp.get("student_evidence", ""),
+                "model_answer": comp.get("model_answer", ""),
+            })
+
+        if not formatted_breakdown and rubric_components:
             for comp in rubric_components:
-                rubric_breakdown.append({
+                formatted_breakdown.append({
                     "component": comp.get("name", "Criteria"),
                     "marks_awarded": 0.0,
                     "max_marks": float(comp.get("marks", 1.0)),
                     "feedback": "Evaluated by multimodal model.",
+                    "student_evidence": "Not found in student script",
+                    "model_answer": comp.get("model_answer", ""),
                 })
+
+        evaluator_rationale = data.get("evaluator_rationale") or data.get("feedback") or "Evaluated with criteria-based explainability."
 
         eval_result = {
             "questions": [
                 {
                     "question_number": 1,
                     "question_text": f"{subject} Answer Assessment",
-                    "component_scores": rubric_breakdown,
+                    "component_scores": formatted_breakdown,
                     "total_marks": total,
                     "max_marks": max_s,
-                    "feedback": data.get("feedback") or "Evaluated by Unified Multimodal VLM.",
+                    "feedback": evaluator_rationale,
                 }
             ],
             "total_score": total,

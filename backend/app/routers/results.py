@@ -234,6 +234,22 @@ async def get_detailed_result(evaluation_id: str, sheet_id: str):
             min_diff = diff
             closest_grade = g
 
+    rubric_text = ""
+    if rubric_components:
+        r_lines = []
+        for idx, comp in enumerate(rubric_components, start=1):
+            c_name = comp.get("name", f"Component {idx}")
+            c_marks = comp.get("marks", 0)
+            c_ans = comp.get("model_answer", "")
+            c_bands = comp.get("mark_bands", "")
+            l = f"{idx}. {c_name} (Max Marks: {c_marks})"
+            if c_ans:
+                l += f"\n   Expected Solution: {c_ans}"
+            if c_bands:
+                l += f"\n   Marking Criteria: {c_bands}"
+            r_lines.append(l)
+        rubric_text = "\n\n".join(r_lines)
+
     return {
         "success": True,
         "sheet_id": sheet_id,
@@ -250,6 +266,7 @@ async def get_detailed_result(evaluation_id: str, sheet_id: str):
         "error": doc.get("error"),
         "rubric_file_name": rubric_file_name,
         "rubric_components": rubric_components,
+        "rubric_text": rubric_text,
         "grade_boundaries": boundaries_list,
         "grade_boundary_details": {
             "boundaries": boundaries_dict,

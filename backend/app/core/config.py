@@ -28,7 +28,9 @@ class Settings(BaseSettings):
 
     # Ollama Unified VLM
     ollama_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen-eval"
+    ollama_model: str = "gemma4:e4b"
+    image_max_dim: int = 768
+    vlm_max_tokens: int = 8192
 
     # Logging
     log_dir: str = "logs"
@@ -42,7 +44,7 @@ class Settings(BaseSettings):
     ]
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(BASE_DIR / ".env"), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

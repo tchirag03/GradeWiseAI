@@ -18,6 +18,7 @@ interface ComponentScore {
   max_marks: number
   feedback?: string
   model_answer?: string
+  student_evidence?: string
 }
 
 interface QuestionScore {
@@ -60,6 +61,7 @@ interface ScriptResultDetails {
   message?: string
   rubric_file_name?: string
   rubric_components?: { name: string; marks: number; model_answer?: string; mark_bands?: string }[]
+  rubric_text?: string
   grade_boundaries?: { grade: string; min_percentage: number }[]
   error?: string
   status?: string
@@ -83,6 +85,7 @@ function ScriptDetails() {
 
   // Explainability states
   const [expandedSideBySide, setExpandedSideBySide] = useState<number | null>(null)
+  const [rubricViewMode, setRubricViewMode] = useState<'cards' | 'raw'>('cards')
 
   useEffect(() => {
     if (!evaluationId || !scriptId) return
@@ -342,7 +345,7 @@ function ScriptDetails() {
           <div className="space-y-6">
             {/* OCR Text Card */}
             <div className="bg-white border-2 border-slate-200 rounded-lg overflow-hidden flex flex-col shadow-sm">
-              <div className="bg-slate-50 border-b border-slate-200 p-4">
+              <div className="bg-slate-50 border-b border-slate-200 p-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="p-1.5 bg-blue-100 text-blue-600 rounded">
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -350,18 +353,128 @@ function ScriptDetails() {
                     </svg>
                   </div>
                   <div>
-                    <h2 className="text-lg font-bold text-slate-800">Digitized Text & Math (Stage 1)</h2>
-                    <p className="text-xs text-slate-500">Transcribed via Unified Qwen3-VL (8B)</p>
+                    <h2 className="text-lg font-bold text-slate-800">Verbatim Extracted Script & Math (Stage 1)</h2>
+                    <p className="text-xs text-slate-500">Full handwritten transcription via Unified Qwen3-VL (8B)</p>
                   </div>
                 </div>
+                <button
+                  onClick={() => navigator.clipboard.writeText(ocrText)}
+                  className="text-xs font-semibold px-2.5 py-1 text-slate-600 bg-white border border-slate-200 rounded hover:bg-slate-50 transition-colors shadow-2xs"
+                  title="Copy transcription"
+                >
+                  📋 Copy Text
+                </button>
               </div>
 
-              <div className="p-5 bg-slate-50/50 max-h-[420px] overflow-y-auto">
-                <pre className="font-mono text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">
+              <div className="p-5 bg-slate-50/50 max-h-[550px] overflow-y-auto">
+                <pre className="font-mono text-sm text-slate-800 whitespace-pre-wrap leading-relaxed select-text">
                   {ocrText}
                 </pre>
               </div>
             </div>
+
+            {/* Extracted Institutional Rubric Card (Context Fed to LLM) */}
+            {details.rubric_components && details.rubric_components.length > 0 && (
+              <div className="bg-white border-2 border-emerald-300 rounded-xl overflow-hidden shadow-sm">
+                <div className="bg-emerald-50/90 border-b border-emerald-200 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 bg-emerald-600 text-white rounded-lg shadow-2xs">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-base font-bold text-emerald-950">Extracted Institutional Rubric</h2>
+                          <span className="text-[11px] font-semibold bg-emerald-200/70 text-emerald-900 px-2 py-0.5 rounded-full border border-emerald-300">
+                            LLM Ground Truth
+                          </span>
+                        </div>
+                        <p className="text-xs text-emerald-800 mt-0.5">
+                          {details.rubric_file_name ? `Source: ${details.rubric_file_name}` : 'Uploaded Rubric Document'} • Fed directly into model context
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="inline-flex rounded-lg border border-emerald-200 bg-white p-0.5 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setRubricViewMode('cards')}
+                          className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                            rubricViewMode === 'cards'
+                              ? 'bg-emerald-600 text-white shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          Criteria Cards ({details.rubric_components.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRubricViewMode('raw')}
+                          className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                            rubricViewMode === 'raw'
+                              ? 'bg-emerald-600 text-white shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          Raw Prompt Context
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {rubricViewMode === 'cards' ? (
+                  <div className="p-4 space-y-3 bg-emerald-50/20 max-h-[460px] overflow-y-auto">
+                    {details.rubric_components.map((comp, idx) => (
+                      <div key={idx} className="bg-white border border-emerald-200/80 rounded-lg p-3.5 shadow-2xs transition-all hover:border-emerald-300">
+                        <div className="flex justify-between items-start gap-2 mb-1.5">
+                          <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                            <span className="bg-emerald-700 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+                              Criterion #{idx + 1}
+                            </span>
+                            <span>{comp.name}</span>
+                          </h4>
+                          <span className="shrink-0 text-xs font-bold bg-emerald-50 text-emerald-800 px-2.5 py-0.5 rounded-full border border-emerald-200 font-mono">
+                            {comp.marks} marks
+                          </span>
+                        </div>
+
+                        {comp.model_answer && (
+                          <div className="mt-2 text-xs bg-slate-50 border border-slate-200/80 rounded p-2 text-slate-700 leading-relaxed">
+                            <span className="font-semibold text-slate-900">Expected Criteria / Solution: </span>
+                            <span className="font-mono text-[11px] text-slate-800 whitespace-pre-wrap">{comp.model_answer}</span>
+                          </div>
+                        )}
+
+                        {comp.mark_bands && (
+                          <p className="text-[11px] text-slate-500 mt-1.5 italic">
+                            Marking Rules: {comp.mark_bands}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-4 bg-slate-900 text-emerald-300 max-h-[460px] overflow-y-auto font-mono text-xs leading-relaxed">
+                    <div className="flex justify-between items-center pb-2 mb-2 border-b border-slate-700 text-slate-400 text-[11px]">
+                      <span>Prompt Context: ### OFFICIAL GRADING RUBRIC</span>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(details.rubric_text || '')}
+                        className="text-xs text-emerald-400 hover:text-emerald-200"
+                      >
+                        📋 Copy Context
+                      </button>
+                    </div>
+                    <pre className="whitespace-pre-wrap select-text">
+                      {details.rubric_text || details.rubric_components.map((c, i) => `${i+1}. ${c.name} (${c.marks} marks)\n   Expected: ${c.model_answer || 'Standard criteria'}`).join('\n\n')}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Stage 2 Diagram Descriptions Card */}
             {(figureCrops.length > 0 || details.diagram_description) && (
@@ -447,22 +560,38 @@ function ScriptDetails() {
                     <div className="p-5">
                       {/* Sub-components if available */}
                       {q.component_scores && q.component_scores.length > 0 && (
-                        <div className="mb-4 space-y-2.5">
-                          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Rubric Assessment</h4>
+                        <div className="mb-4 space-y-3">
+                          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Rubric Criteria & Explainability Breakdown</h4>
                           {q.component_scores.map((comp, idx) => {
                             const compPct = comp.max_marks > 0 ? (comp.marks_awarded / comp.max_marks) * 100 : 0
                             return (
-                              <div key={idx} className="bg-white border border-slate-100 rounded-lg p-3 shadow-sm">
-                                <div className="flex justify-between items-center mb-1">
-                                  <span className="text-sm font-semibold text-slate-700">{comp.component}</span>
-                                  <span className="text-sm font-bold text-slate-800">{comp.marks_awarded} <span className="text-slate-400 font-normal">/ {comp.max_marks}</span></span>
+                              <div key={idx} className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm transition-all hover:border-slate-300">
+                                <div className="flex justify-between items-center mb-1.5">
+                                  <span className="text-sm font-semibold text-slate-800">{comp.component}</span>
+                                  <span className="text-sm font-bold text-slate-800">
+                                    {comp.marks_awarded} <span className="text-slate-400 font-normal">/ {comp.max_marks}</span>
+                                  </span>
                                 </div>
-                                <div className="w-full bg-slate-100 rounded-full h-1.5">
+                                <div className="w-full bg-slate-100 rounded-full h-2 mb-2">
                                   <div
-                                    className={`h-1.5 rounded-full ${getProgressColor(compPct)}`}
+                                    className={`h-2 rounded-full ${getProgressColor(compPct)}`}
                                     style={{ width: `${compPct}%` }}
                                   ></div>
                                 </div>
+
+                                {comp.feedback && (
+                                  <div className="mt-2 text-xs bg-slate-50 border border-slate-200/80 rounded-md p-2.5 text-slate-700 leading-relaxed">
+                                    <span className="font-semibold text-slate-900">Explainability Rationale: </span>
+                                    <span>{comp.feedback}</span>
+                                  </div>
+                                )}
+
+                                {comp.student_evidence && comp.student_evidence !== 'Not found in student script' && (
+                                  <div className="mt-1.5 text-[11px] text-slate-600 bg-amber-50/70 border border-amber-200/60 rounded px-2.5 py-1.5 font-mono">
+                                    <span className="font-semibold text-amber-900 font-sans">Script Evidence: </span>
+                                    <span>"{comp.student_evidence}"</span>
+                                  </div>
+                                )}
                               </div>
                             )
                           })}
