@@ -165,8 +165,12 @@ export default function ProcessEvaluation() {
           updateStage(0, { status: 'in-progress', progress: 50 })
         } else if (payload.type === 'sheet_start') {
           updateStage(0, { status: 'completed', progress: 100 })
-          updateStage(1, { status: 'in-progress', progress: 40 })
-          updateStage(2, { status: 'in-progress', progress: 40 })
+          updateStage(1, { status: 'in-progress', progress: 20 })
+          updateStage(2, { status: 'pending', progress: 0 })
+        } else if (payload.type === 'vlm_ping') {
+          updateStage(1, { status: 'in-progress', progress: 35 })
+        } else if (payload.type === 'vlm_ping_ok') {
+          updateStage(1, { status: 'in-progress', progress: 50 })
         } else if (payload.type === 'vlm_dispatch') {
           updateStage(1, { status: 'in-progress', progress: 85 })
           updateStage(2, { status: 'in-progress', progress: 80 })
@@ -434,7 +438,7 @@ export default function ProcessEvaluation() {
       {/* Header */}
       <div className="mb-8">
         <button
-          onClick={() => navigate('/evaluations')}
+          onClick={() => navigate('/')}
           className="text-sm text-slate-600 hover:text-slate-900 mb-4 inline-flex items-center gap-1"
         >
           ← Back to Evaluations
@@ -543,7 +547,7 @@ export default function ProcessEvaluation() {
                 </div>
               </div>
               <button
-                onClick={() => navigate(`/evaluations/${evaluationId}/results`)}
+                onClick={() => navigate(`/evaluation/${evaluationId}/results`)}
                 className="px-5 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg shadow transition-colors"
               >
                 View Results →

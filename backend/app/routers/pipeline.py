@@ -91,6 +91,22 @@ async def start_pipeline(evaluation_id: str):
     run_dir = getattr(logger, "run_dir", "")
     log_file = getattr(logger, "log_file", "")
 
+    # Pre-flight check: Verify Ollama and model are ready before marking status as processing
+    from app.services.unified_vlm_service import get_unified_vlm_service
+    vlm_svc = get_unified_vlm_service()
+    logger.info("Pre-flight: Checking Ollama model '%s' (\"Are you up?\")...", vlm_svc.model_name)
+    is_up, ping_latency, ping_reply = await vlm_svc.ping_model()
+    if not is_up:
+        logger.error("Pre-flight check failed for model '%s': %s", vlm_svc.model_name, ping_reply)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Cannot start pipeline: Ollama model '{vlm_svc.model_name}' is not reachable ({ping_reply}). "
+                f"Please ensure Ollama is running (`ollama serve`) and model '{vlm_svc.model_name}' is loaded."
+            ),
+        )
+    logger.info("Pre-flight check passed in %.2fs (Ollama runner ready in RAM).", ping_latency)
+
     # Set initial pipeline status and associate run folder
     await db.evaluations.update_one(
         {"_id": ObjectId(evaluation_id)},
@@ -110,23 +126,17 @@ async def start_pipeline(evaluation_id: str):
         {"$set": {"status": "preprocessing-pending", "error": None}}
     )
 
-    arq_pool = get_arq_pool()
-    if arq_pool:
-        # Enqueue via Redis worker queue
+    # Process sheets sequentially in-process so local CPU is not overwhelmed
+    # and execution begins immediately without requiring a separate external worker process.
+    async def _run_sequential():
         for s_id in sheet_ids:
-            await arq_pool.enqueue_job("process_sheet_extraction", evaluation_id, s_id, run_id)
-        mode = "Arq Redis Worker Queue"
-    else:
-        # Process sheets sequentially in-process so local CPU is not overwhelmed
-        async def _run_sequential():
-            for s_id in sheet_ids:
-                try:
-                    await process_sheet_extraction(None, evaluation_id, s_id, run_id)
-                except Exception as e:
-                    pass
+            try:
+                await process_sheet_extraction(None, evaluation_id, s_id, run_id)
+            except Exception as e:
+                logger.error("Error running sheet extraction for %s: %s", s_id, e)
 
-        asyncio.create_task(_run_sequential())
-        mode = "In-Process Sequential Worker"
+    asyncio.create_task(_run_sequential())
+    mode = "In-Process Sequential Worker"
 
     logger.info("==================================================")
     logger.info("PIPELINE RUN INITIATED: %s", run_id)

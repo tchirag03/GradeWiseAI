@@ -94,10 +94,12 @@ async def process_sheet_extraction(ctx, evaluation_id: str, sheet_id: str, run_i
         )
 
     except Exception as exc:
+        import traceback
         err_msg = str(exc)
         if not err_msg:
             err_msg = f"{type(exc).__name__}: Model inference request timed out or was interrupted."
-        logger.error("✗ Sheet %s failed with error: %s", sheet_id, err_msg)
+        logger.error("Sheet %s FAILED: %s", sheet_id, err_msg)
+        logger.error("Full traceback:\n%s", traceback.format_exc())
         await db.sheets.update_one(
             {"_id": ObjectId(sheet_id)},
             {
