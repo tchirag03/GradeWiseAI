@@ -1,551 +1,229 @@
 # Sustainable AI Assessment Platform
 
-An end-to-end, AI-powered evaluation system that automates the grading of handwritten answer sheets using a three-stage pipeline: **OCR → Text Structuring → SLM Evaluation**. Built as a full-stack application with a FastAPI backend and React frontend.
+An end-to-end, **100% offline**, privacy-preserving assessment platform that automates the evaluation of handwritten examination answer sheets. Powered by a local multimodal Vision-Language Model (**Qwen-VL** via Ollama), FastAPI, React 19, and MongoDB.
 
 ---
 
-## Table of Contents
+## Key Highlights
 
-- [Project Overview](#project-overview)
-- [System Architecture](#system-architecture)
-- [Three-Stage AI Pipeline](#three-stage-ai-pipeline)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Backend Architecture](#backend-architecture)
-- [Frontend Architecture](#frontend-architecture)
-- [Database Design](#database-design)
-- [API Reference](#api-reference)
-- [Getting Started](#getting-started)
-- [Environment Variables](#environment-variables)
+- **100% Local & Privacy-Preserving**: Runs entirely on local hardware (CPU/GPU) with zero cloud dependencies and no external data transmission.
+- **Unified Multimodal VLM Pipeline**: Replaces fragile multi-model chains (cloud OCR + regex + text SLM) with an end-to-end vision-language model (`qwen-eval`) performing handwriting transcription, LaTeX math parsing, diagram structural perception, and rubric alignment in a holistic pass.
+- **Pre-Flight Health Check ("Are You Up?")**: Automatically pings the local model runner before kicking off batch processing to verify memory allocation in RAM (`llama-server.exe`), eliminating cold-start hangs and empty responses.
+- **Real-Time Live SSE Stream Console**: Server-Sent Events (SSE) stream terminal-grade logs, model ping status, and stage progress directly into the frontend.
+- **Human-in-the-Loop Triage (Stage 4)**: Automatically detects borderline scores (<60% or within 2.5% of grade boundaries) and handwriting ambiguities, routing them to educators for rapid review.
+- **Detailed Run Logs**: Each pipeline execution generates a timestamped folder (`logs/{evaluation_id}/run_{timestamp}/`) containing full debug traces, token timings, and structured outputs.
 
 ---
 
-## Project Overview
-
-The platform addresses the challenge of **manually grading large volumes of handwritten answer sheets** in educational institutions. Instead of requiring human evaluators to read and score each paper individually, the system:
-
-1. **Scans** handwritten answer sheets (uploaded as images)
-2. **Extracts** text from the images using OCR
-3. **Structures** the raw text into question-answer pairs
-4. **Evaluates** answers against a rubric using a Small Language Model (SLM)
-5. **Generates** detailed results, analytics, and exportable reports
-
-All AI inference runs **locally on-device** — no cloud APIs, no data leaves the machine.
-
----
-
-## System Architecture
+## 5-Stage Offline Pipeline Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Frontend (React + Vite)                     │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐  │
-│  │   Home   │ │  Upload  │ │ Process  │ │ Results  │ │ Export  │  │
-│  │   Page   │ │  Sheets  │ │ Pipeline │ │ Overview │ │ Reports │  │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬────┘  │
-│       └────────────┴────────────┴────────────┴────────────┘        │
-│                          Axios HTTP Client                         │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ REST API (JSON)
-                               ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                      Backend (FastAPI + Uvicorn)                     │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │                        API Layer (Routers)                      │  │
-│  │  evaluations │ sheets │ ocr │ structuring │ slm │ results │ …  │  │
-│  └──────────────────────────┬──────────────────────────────────────┘  │
-│                             │                                        │
-│  ┌──────────────────────────▼──────────────────────────────────────┐  │
-│  │                     Service Layer (AI Models)                   │  │
-│  │  ┌──────────────┐  ┌───────────────────┐  ┌─────────────────┐  │  │
-│  │  │  OCR Service  │  │ Structuring Svc   │  │   SLM Service   │  │  │
-│  │  │ (Mistral OCR) │  │ (Regex+Heuristic) │  │  (Qwen2.5-0.5B) │  │  │
-│  │  └──────────────┘  └───────────────────┘  └─────────────────┘  │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-│                             │                                        │
-│  ┌──────────────────────────▼──────────────────────────────────────┐  │
-│  │                      Data Layer                                 │  │
-│  │  ┌─────────────────┐  ┌─────────────┐  ┌────────────────────┐  │  │
-│  │  │   MongoDB        │  │   Redis      │  │  File Storage      │  │  │
-│  │  │   (Documents)    │  │   (Cache +   │  │  (Uploaded Images) │  │  │
-│  │  │                  │  │    Job Queue) │  │                    │  │  │
-│  │  └─────────────────┘  └─────────────┘  └────────────────────┘  │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              5-STAGE OFFLINE VLM PIPELINE                              │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                        │
+│  [ Answer Sheet Image ] ──► [ Institutional Rubric (PDF/Text) ]                         │
+│             │                               │                                          │
+│             ▼                               ▼                                          │
+│  ┌───────────────────────┐       ┌───────────────────────┐                             │
+│  │ Stage 0: Preprocess   │       │ Pre-Flight Ping Check │ ──► "Are you up?" (0.5s)    │
+│  │ Resize & 640px Norm   │       │ Model Loaded in RAM   │     (llama-server.exe)      │
+│  └──────────┬────────────┘       └──────────┬────────────┘                             │
+│             │                               │                                          │
+│             └───────────────────────┬───────┘                                          │
+│                                     ▼                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Unified VLM Inference Pass (Local Qwen-VL)                                       │  │
+│  │                                                                                  │  │
+│  │  ► Stage 1: Unified Multimodal Transcription (Handwriting & LaTeX formulas)      │  │
+│  │  ► Stage 2: Diagram & Structural Perception (Flowcharts, matrices, trees)        │  │
+│  │  ► Stage 3: Dynamic Rubric Alignment & Scoring (Per-component rationale)         │  │
+│  └──────────────────────────────────┬───────────────────────────────────────────────┘  │
+│                                     │                                                  │
+│                                     ▼                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Stage 4: Flagging & Educator Triage Queue                                        │  │
+│  │  ► Auto-detects borderline scores & ambiguous handwriting                         │  │
+│  │  ► Routes flagged scripts for educator approval in Review Queue                  │  │
+│  └──────────────────────────────────┬───────────────────────────────────────────────┘  │
+│                                     │                                                  │
+│                                     ▼                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Persistence & Real-Time Observability                                             │  │
+│  │  ► MongoDB: Sheet scores, component breakdown, transcriptions, student metadata  │  │
+│  │  ► Live SSE Stream: /api/evaluations/{id}/pipeline/stream                        │  │
+│  │  ► Dedicated Run Logs: logs/{evaluation_id}/{run_id}/run.log                      │  │
+│  └──────────────────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Three-Stage AI Pipeline
-
-Each stage runs as an **asynchronous background job** with progress tracking and status polling.
-
-### Stage 1: OCR — Handwritten Text Extraction
-
-| Attribute      | Detail |
-|:---------------|:-------|
-| **Service**    | Mistral OCR API (`mistral-ocr-latest`) |
-| **Input**      | Uploaded answer sheet image (PNG/JPG) |
-| **Output**     | Markdown-formatted extracted text |
-| **Runs on**    | Cloud (Mistral AI Platform) |
-
-**How it works:**
-1. Image is read and base64-encoded
-2. Sent to Mistral's `ocr.process()` with `mistral-ocr-latest` model
-3. Markdown text is extracted from all response pages
-4. Extracted text and processing time are stored on the sheet document in MongoDB
-
-### Stage 2: Text Structuring — Q&A Parsing
-
-| Attribute      | Detail |
-|:---------------|:-------|
-| **Method**     | Regex + Heuristic rules (no ML model needed) |
-| **Input**      | Raw OCR text |
-| **Output**     | Structured question-answer objects |
-
-**How it works:**
-1. Regex patterns detect question markers (`Q1`, `1.`, `Question 1`, etc.)
-2. Text is split into individual question blocks
-3. Each question is parsed for:
-   - **Answer steps** (Step 1, a), i., etc.)
-   - **Code blocks** (detected via language-specific indicators)
-   - **Keywords** (matched against a CS/programming keyword dictionary)
-   - **Complexity** (Big-O notation extraction)
-4. Structured data is stored as a nested document on the sheet
-
-### Stage 3: SLM Evaluation — AI Grading
-
-| Attribute      | Detail |
-|:---------------|:-------|
-| **Model**      | `Qwen/Qwen2.5-0.5B-Instruct` (Small Language Model) |
-| **Quantization** | None (float32 for smooth CPU execution) |
-| **Input**      | Structured Q&A + rubric components |
-| **Output**     | Per-question scores, component breakdown, letter grade |
-
-**How it works:**
-1. For each question, a grading prompt is constructed with:
-   - The question text
-   - The student's answer
-   - Rubric components with mark allocations
-2. The SLM generates a JSON response with per-component scores and feedback
-3. Response is parsed (with fallback heuristics if JSON is malformed)
-4. Total score, percentage, and letter grade are calculated
-5. Full evaluation result is persisted to MongoDB
-
-**Grading Scale:**
-
-| Percentage | Grade |
-|:-----------|:------|
-| ≥ 90%      | A+    |
-| ≥ 80%      | A     |
-| ≥ 70%      | B+    |
-| ≥ 60%      | B     |
-| ≥ 50%      | C     |
-| ≥ 40%      | D     |
-| < 40%      | F     |
 
 ---
 
 ## Tech Stack
 
 ### Backend
-
-| Technology | Purpose |
-|:-----------|:--------|
-| **FastAPI** | Async web framework with automatic OpenAPI docs |
-| **Uvicorn** | ASGI server |
-| **Pydantic** | Request/response validation and serialization |
-| **MongoDB** (Motor) | Document database for evaluations, sheets, results |
-| **Redis** | Caching layer and background job queue |
-| **Mistral OCR** | Cloud OCR API for handwritten text extraction |
-| **PyTorch** | Deep learning runtime for SLM |
-| **Transformers** (HuggingFace) | Model loading and inference pipeline (SLM) |
-| **Pillow** | Image preprocessing |
-| **ReportLab** | PDF report generation |
+- **FastAPI** — High-performance asynchronous REST API framework
+- **Uvicorn** — ASGI web server
+- **Motor / MongoDB** — Asynchronous document store for evaluations, answer sheets, rubrics, and scores
+- **Ollama (`llama-server.exe`)** — Local GGUF inference runner for the `qwen-eval` multimodal vision model
+- **Pillow** — Image normalization and bilinear downsampling
+- **Server-Sent Events (SSE)** — Real-time event bus broadcasting execution progress to clients
+- **ReportLab** — PDF report generator
 
 ### Frontend
-
-| Technology | Purpose |
-|:-----------|:--------|
-| **React 19** | UI component framework |
-| **TypeScript** | Type-safe application logic |
-| **Vite 7** | Build tool and dev server |
-| **Tailwind CSS 4** | Utility-first styling |
-| **React Router 7** | Client-side routing |
-| **Axios** | HTTP client for API communication |
-| **Lucide React** | Icon library |
-| **Redux Toolkit** | State management |
+- **React 19 & TypeScript** — Modern type-safe single-page application
+- **Vite 7** — Fast HMR build tool and dev server
+- **Tailwind CSS 4** — Utility-first responsive styling
+- **React Router 7** — Client-side navigation supporting both `/evaluation/:id` and `/evaluations/:id` aliases
+- **Custom SSE Live Terminal** — Real-time execution log viewer with auto-scroll and one-click copy
 
 ---
 
 ## Project Structure
 
 ```
-pp1/
-├── README.md                      ← You are here
-│
+capstone/
 ├── backend/
-│   ├── .env                       # Environment variables
-│   ├── requirements.txt           # Python dependencies
 │   ├── app/
-│   │   ├── main.py                # FastAPI app + lifespan (model init)
-│   │   │
-│   │   ├── core/                  # Infrastructure
-│   │   │   ├── config.py          # Pydantic settings (env-driven)
-│   │   │   ├── mongodb.py         # Motor async MongoDB connection
-│   │   │   └── redis_client.py    # Redis async connection
-│   │   │
-│   │   ├── services/              # AI Model Services (singletons)
-│   │   │   ├── ocr_service.py     # TrOCR handwritten text extraction
-│   │   │   ├── structuring_service.py  # Regex Q&A parser
-│   │   │   └── slm_service.py     # Qwen2.5-0.5B answer evaluation
-│   │   │
-│   │   ├── schemas/               # Pydantic Models (API contracts)
-│   │   │   ├── common.py          # Shared types (SuccessResponse, etc.)
-│   │   │   ├── evaluation.py      # Evaluation CRUD schemas
-│   │   │   ├── sheet.py           # Sheet upload schemas
-│   │   │   ├── structuring.py     # Structured Q&A schemas
-│   │   │   ├── slm.py             # SLM evaluation result schemas
-│   │   │   ├── rubric.py          # Rubric component schemas
-│   │   │   ├── script.py          # Answer script schemas
-│   │   │   ├── student.py         # Student schemas
-│   │   │   ├── analytics.py       # Analytics schemas
-│   │   │   ├── queue.py           # Job queue schemas
-│   │   │   └── settings.py        # App settings schemas
-│   │   │
-│   │   ├── routers/               # API Endpoints
-│   │   │   ├── evaluations.py     # CRUD: create, list, get, delete
-│   │   │   ├── sheets.py          # Upload, list, delete sheets
-│   │   │   ├── ocr.py             # Start OCR, poll status, get result
-│   │   │   ├── structuring.py     # Start structuring, poll, get result
-│   │   │   ├── slm.py             # Start SLM eval, poll, get result
-│   │   │   ├── results.py         # Aggregated results + detailed view
-│   │   │   ├── export.py          # CSV and PDF export
-│   │   │   ├── settings.py        # App settings management
-│   │   │   ├── scripts.py         # Answer script management
-│   │   │   ├── evaluation_jobs.py # Job history
-│   │   │   ├── analytics.py       # Analytics endpoints
-│   │   │   └── performance.py     # Performance metrics
-│   │   │
-│   │   └── db/                    # Database Layer
-│   │       ├── repositories/      # CRUD operations
-│   │       │   ├── rubric_repo.py
-│   │       │   ├── script_repo.py
-│   │       │   └── student_repo.py
-│   │       ├── queries/           # Aggregation pipelines + indexes
-│   │       │   ├── aggregation_queries.py
-│   │       │   └── index_setup.py
-│   │       └── services/          # Redis-backed services
-│   │           ├── cache_service.py
-│   │           ├── queue_service.py
-│   │           └── status_service.py
-│   │
-│   └── scripts/                   # Utility scripts
-│       ├── seed_data.py           # MongoDB seed data
-│       └── benchmark.py           # Performance benchmarks
+│   │   ├── main.py                     # FastAPI application entrypoint & lifespan
+│   │   ├── core/
+│   │   │   ├── config.py               # Pydantic settings & model configuration
+│   │   │   ├── mongodb.py              # Motor async database connection
+│   │   │   ├── event_bus.py            # SSE in-memory event bus
+│   │   │   ├── logging_config.py       # Dedicated run log folder handlers
+│   │   │   └── arq_pool.py             # Redis / Arq pool manager
+│   │   ├── services/
+│   │   │   ├── unified_vlm_service.py  # Local Qwen-VL multimodal perception & evaluation
+│   │   │   ├── rubric_parser.py        # Institutional rubric parser (PDF/TXT)
+│   │   │   └── ocr_service.py          # OCR service adapter
+│   │   ├── routers/
+│   │   │   ├── evaluations.py          # Evaluation CRUD operations
+│   │   │   ├── sheets.py               # Sheet upload, listing, and deletion
+│   │   │   ├── pipeline.py             # 5-Stage pipeline start, SSE stream & status
+│   │   │   ├── results.py              # Results summary, score breakdown & triage
+│   │   │   └── export.py               # CSV, PDF, and TXT report generation
+│   │   └── worker.py                   # In-process background sheet extraction worker
+│   ├── logs/                           # Per-evaluation execution run logs
+│   ├── uploads/                        # Uploaded answer sheet images & rubrics
+│   └── requirements.txt                # Python backend dependencies
 │
 └── frontend/
-    ├── index.html
-    ├── package.json
-    ├── vite.config.ts
-    └── src/
-        ├── main.tsx               # App entry point
-        ├── App.tsx                # Route definitions
-        ├── index.css              # Global styles
-        │
-        ├── pages/                 # Page Components
-        │   ├── Home.tsx           # Dashboard with evaluation list
-        │   ├── CreateEvaluation.tsx  # New evaluation form
-        │   ├── UploadSheets.tsx   # Drag-and-drop sheet upload
-        │   ├── ProcessEvaluation.tsx # Pipeline progress tracker
-        │   ├── ResultsOverview.tsx   # Score summary + charts
-        │   ├── ScriptDetails.tsx  # Per-student detailed breakdown
-        │   ├── ExportResults.tsx  # CSV/PDF export controls
-        │   ├── Settings.tsx       # App configuration
-        │   ├── RubricBuilder.tsx  # Custom rubric creation
-        │   ├── OpenEvaluation.tsx # Open existing evaluation
-        │   └── NotFound.tsx       # 404 page
-        │
-        ├── components/            # Reusable Components
-        │   ├── Layout.tsx         # App shell with Navbar
-        │   ├── EvaluationLayout.tsx # Evaluation-scoped wrapper
-        │   ├── Navbar.tsx         # Top navigation bar
-        │   ├── Sidebar.tsx        # Evaluation step sidebar
-        │   ├── Footer.tsx         # Page footer
-        │   ├── Button.tsx
-        │   ├── Card.tsx
-        │   ├── Modal.tsx
-        │   └── ProgressBar.tsx
-        │
-        ├── api/                   # API Client Layer
-        │   ├── index.ts           # Axios instance + interceptors
-        │   ├── endpoints.ts       # All endpoint URL constants
-        │   ├── common.ts          # Shared types
-        │   ├── evaluations.ts     # Evaluation API calls
-        │   ├── evaluation.ts      # Single evaluation calls
-        │   ├── sheets.ts          # Sheet upload API
-        │   ├── ocr.ts             # OCR pipeline API
-        │   ├── structuring.ts     # Structuring pipeline API
-        │   ├── results.ts         # Results API
-        │   ├── export.ts          # Export API
-        │   └── settings.ts        # Settings API
-        │
-        └── types/                 # TypeScript type definitions
+    ├── src/
+    │   ├── App.tsx                     # Route definitions & layout wrapping
+    │   ├── pages/
+    │   │   ├── Home.tsx                # Evaluation list & status dashboard
+    │   │   ├── CreateEvaluation.tsx    # Evaluation setup wizard
+    │   │   ├── UploadSheets.tsx        # Answer sheet & rubric upload
+    │   │   ├── ProcessEvaluation.tsx   # 5-Stage progress tracker & SSE live console
+    │   │   ├── ResultsOverview.tsx     # Score distribution & Stage 4 triage filters
+    │   │   ├── ScriptDetails.tsx       # Per-student question breakdown & verification
+    │   │   └── ExportResults.tsx       # Export controls (CSV / PDF / TXT)
+    │   ├── components/                 # Layout, Sidebar, Navbar, and UI widgets
+    │   └── api/                        # Centralized fetch client & API endpoints
+    └── package.json                    # Frontend dependencies
 ```
 
 ---
 
-## Backend Architecture
-
-### Layered Design
-
-The backend follows a **three-layer architecture**:
-
-```
-              ┌──────────────────────────────┐
-              │     Routers (API Layer)       │  ← HTTP request/response
-              │  Validates input, returns JSON │
-              └──────────────┬───────────────┘
-                             │
-              ┌──────────────▼───────────────┐
-              │    Services (Business Logic)   │  ← AI model inference
-              │  Singletons loaded at startup  │
-              └──────────────┬───────────────┘
-                             │
-              ┌──────────────▼───────────────┐
-              │   Data Layer (Repositories)    │  ← MongoDB, Redis, Files
-              │  CRUD, aggregation, caching    │
-              └──────────────────────────────┘
-```
-
-### Application Lifecycle
-
-```python
-# Startup sequence (main.py lifespan):
-1. connect_db()              # MongoDB connection via Motor
-2. connect_redis()           # Redis connection
-3. ensure_indexes()          # Create MongoDB indexes
-4. init_ocr_service()        # Mistral OCR client
-5. init_structuring_service() # Initialize regex parser
-6. init_slm_service()        # Load Qwen2.5-0.5B (~1GB)
-7. start_worker()            # Redis job queue consumer
-```
-
-The Mistral OCR client and the SLM model are initialised **once at startup** and reused across all requests via the singleton pattern.
-
-### Background Job Pattern
-
-All three pipeline stages follow the same asynchronous pattern:
-
-```
-POST /start  →  Creates job record  →  Returns job_id immediately
-                     │
-                     ▼
-            asyncio.create_task()  →  Background worker processes sheets
-                     │
-                     ▼
-            Worker updates progress in MongoDB after each sheet
-                     │
-GET /status  →  Reads job record  →  Returns {completed, failed, percentage}
-                     │
-GET /result  →  Reads sheet doc   →  Returns per-sheet result
-```
-
-This ensures the API never blocks on long-running AI inference.
-
----
-
-## Frontend Architecture
-
-### Routing Structure
-
-```
-/                                    → Home (dashboard)
-/evaluation/new                      → Create new evaluation
-/evaluation/:id/open                 → Open existing evaluation
-/evaluation/:id/upload               → Upload answer sheets
-/evaluation/:id/rubric               → Build grading rubric
-/evaluation/:id/process              → Run AI pipeline (OCR → Structure → Evaluate)
-/evaluation/:id/results              → View results summary
-/evaluation/:id/results/:scriptId    → View detailed per-student breakdown
-/evaluation/:id/export               → Export CSV/PDF
-/settings                            → App settings
-```
-
-### Data Flow
-
-```
-User Action → Page Component → API Client (Axios) → Backend Router
-                                                          │
-                                                     (processes)
-                                                          │
-                                          ← JSON Response ←
-```
-
----
-
-## Database Design
-
-### MongoDB Collections
-
-| Collection | Purpose | Key Fields |
-|:-----------|:--------|:-----------|
-| `evaluations` | Top-level evaluation entity | `name`, `subject`, `max_marks`, `answer_type`, `status` |
-| `sheets` | Individual answer sheets | `evaluation_id`, `file_path`, `status`, `ocr_text`, `structured_data`, `evaluation_result` |
-| `rubrics` | Grading rubric definitions | `components: [{name, marks}]` |
-| `scripts` | Answer script records | `student_id`, `question_id`, `text`, `evaluation` |
-| `students` | Student information | `name`, `roll_no` |
-| `ocr_jobs` | OCR job tracking | `evaluation_id`, `total`, `completed`, `failed`, `status` |
-| `structuring_jobs` | Structuring job tracking | Same structure as ocr_jobs |
-| `slm_jobs` | SLM evaluation job tracking | Same structure as ocr_jobs |
-
-### Sheet Status Lifecycle
-
-```
-uploaded
-   │
-   ▼
-ocr-pending → ocr-processing → ocr-completed
-                                     │
-                                     ▼
-              structuring-pending → structuring-processing → structuring-completed
-                                                                   │
-                                                                   ▼
-                                    evaluation-pending → evaluation-processing → evaluation-completed
-```
-
-Each `*-failed` status allows the stage to be retried.
-
-### Redis Usage
-
-- **Caching**: Stores frequently accessed query results with TTL-based expiry
-- **Job Queue**: Lightweight background task queue for batch operations
-- **Status Tracking**: Real-time pipeline stage status updates
-
----
-
-## API Reference
-
-Base URL: `http://localhost:8000/api`
-
-### Evaluation Management
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `POST` | `/evaluations` | Create a new evaluation |
-| `GET` | `/evaluations` | List all evaluations |
-| `GET` | `/evaluations/{id}` | Get evaluation details |
-| `DELETE` | `/evaluations/{id}` | Delete an evaluation |
-
-### Sheet Management
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `POST` | `/evaluations/{id}/sheets` | Upload answer sheets |
-| `GET` | `/evaluations/{id}/sheets` | List sheets in evaluation |
-| `DELETE` | `/evaluations/{id}/sheets/{sheetId}` | Delete a sheet |
-
-### OCR Pipeline (Stage 1)
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `POST` | `/evaluations/{id}/ocr/start` | Start OCR processing |
-| `GET` | `/evaluations/{id}/ocr/status` | Poll OCR progress |
-| `GET` | `/evaluations/{id}/ocr/result/{sheetId}` | Get OCR result |
-
-### Text Structuring Pipeline (Stage 2)
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `POST` | `/evaluations/{id}/structuring/start` | Start text structuring |
-| `GET` | `/evaluations/{id}/structuring/status` | Poll structuring progress |
-| `GET` | `/evaluations/{id}/structuring/result/{sheetId}` | Get structured result |
-
-### SLM Evaluation Pipeline (Stage 3)
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `POST` | `/evaluations/{id}/evaluation/start` | Start SLM evaluation |
-| `GET` | `/evaluations/{id}/evaluation/status` | Poll evaluation progress |
-| `GET` | `/evaluations/{id}/evaluation/result/{sheetId}` | Get evaluation result |
-
-### Results & Export
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `GET` | `/evaluations/{id}/results` | Aggregated score summary |
-| `GET` | `/evaluations/{id}/results/{sheetId}` | Detailed per-sheet results |
-| `POST` | `/evaluations/{id}/export/csv` | Download CSV report |
-| `POST` | `/evaluations/{id}/export/pdf` | Download PDF report |
-
-### Settings
-| Method | Endpoint | Description |
-|:-------|:---------|:------------|
-| `GET` | `/settings` | Get current settings |
-| `PUT` | `/settings` | Update settings |
-| `POST` | `/settings/clear-cache` | Clear Redis cache |
-
-Full interactive documentation available at `/docs` (Swagger UI) and `/redoc`.
-
----
-
-## Getting Started
+## Quick Start Guide
 
 ### Prerequisites
+1. **Python 3.10+**
+2. **Node.js 18+** & npm
+3. **MongoDB** (running locally on `mongodb://localhost:27017`)
+4. **Ollama** installed on your system (`http://localhost:11434`)
 
-- **Python 3.10+**
-- **Node.js 18+** and npm
-- **MongoDB** (local instance on port 27017)
-- **Redis** (optional — app works without it)
+### 1. Configure the Local VLM Model in Ollama
 
-### Backend Setup
+Create a dedicated direct-response model profile (`qwen-eval`) in Ollama to ensure deterministic JSON evaluation without chain-of-thought token stalls:
 
 ```bash
-cd backend
+# In Ollama CLI, create the optimized model
+ollama create qwen-eval -f ./Modelfile
+```
+
+Ensure the model responds:
+```bash
+ollama run qwen-eval "Respond with 1 word: ready"
+```
+
+### 2. Backend Setup
+
+```bash
+cd capstone/backend
+
+# Create and activate virtual environment
 python -m venv .venv
 
-# Activate virtual environment
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# Linux/macOS:
 source .venv/bin/activate
 
+# Install dependencies
 pip install -r requirements.txt
+
+# Start the FastAPI server with reload
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-**Start the server:**
+The backend starts at `http://localhost:8000`. Interactive OpenAPI documentation is accessible at:
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+
+### 3. Frontend Setup
 
 ```bash
-uvicorn app.main:app --reload
-```
+cd capstone/frontend
 
-The first run will download the SLM model (~1GB):
-- Qwen2.5-0.5B (~1GB)
-
-> **Note:** OCR uses the Mistral OCR API. Set your `MISTRAL_API_KEY`
-> in the `backend/.env` file.
-
-Server starts at: `http://localhost:8000`
-
-### Frontend Setup
-
-```bash
-cd frontend
+# Install dependencies
 npm install
+
+# Start Vite dev server
 npm run dev
 ```
 
-Dev server starts at: `http://localhost:5173`
+The frontend application starts at `http://localhost:5173`.
 
 ---
 
-## Environment Variables
+## Workflow Walkthrough
 
-Create a `.env` file in the `backend/` directory:
-
-```env
-MONGO_URI=mongodb://localhost:27017
-DB_NAME=evaluation_db
-REDIS_HOST=localhost
-REDIS_PORT=6379
-MISTRAL_API_KEY=your_mistral_api_key_here
-```
+1. **Create Evaluation**: Go to `http://localhost:5173`, click **New Evaluation**, specify course subject, maximum marks, and evaluation name.
+2. **Upload Rubric & Sheets**: Upload your institutional marking rubric (PDF or text) and student answer sheets (JPG/PNG).
+3. **Run Pipeline**:
+   - Click **Start Pipeline**.
+   - The backend performs an automated **pre-flight ping** (`"Are you up?"`), warming `llama-server.exe` in RAM (~6.87 GB).
+   - Watch real-time logs stream in the **SSE Terminal** as each sheet undergoes image normalization, handwriting OCR, LaTeX extraction, diagram parsing, and rubric grading.
+4. **Inspect Results & Triage**:
+   - Navigate to the **Results Overview** (`/evaluation/:id/results`).
+   - Scripts needing educator review (Stage 4 triage) are flagged with specific review rationales.
+   - Click any script to inspect component-by-component scoring, model feedback, and transcribed answers.
+5. **Export Reports**: Generate comprehensive CSV, PDF, or TXT evaluation reports ready for academic records.
 
 ---
 
-**Status**: Full pipeline implemented — OCR (Mistral OCR) ✅ | Structuring ✅ | SLM Evaluation ✅ | Results ✅ | Export ✅
+## API Endpoints Summary
+
+| Method | Endpoint | Description |
+|:-------|:---------|:------------|
+| `POST` | `/api/evaluations` | Create a new evaluation |
+| `GET`  | `/api/evaluations` | List all evaluations |
+| `GET`  | `/api/evaluations/{id}` | Get evaluation details |
+| `DELETE` | `/api/evaluations/{id}` | Delete an evaluation & related records |
+| `POST` | `/api/evaluations/{id}/sheets` | Upload student answer sheets |
+| `GET`  | `/api/evaluations/{id}/sheets` | List sheets with processing statuses |
+| `POST` | `/api/evaluations/{id}/rubric` | Upload institutional grading rubric |
+| `POST` | `/api/evaluations/{id}/pipeline/start` | Trigger 5-stage offline evaluation pipeline |
+| `GET`  | `/api/evaluations/{id}/pipeline/status` | Poll pipeline execution progress |
+| `GET`  | `/api/evaluations/{id}/pipeline/stream` | Real-time SSE stream of run logs and stage events |
+| `GET`  | `/api/evaluations/{id}/results` | Aggregated class performance & triage summary |
+| `GET`  | `/api/evaluations/{id}/results/{sheet_id}` | Detailed student question-by-question scoring |
+| `POST` | `/api/evaluations/{id}/review_queue/{sheet_id}/resolve` | Resolve/approve flagged script score |
+| `GET`  | `/api/evaluations/{id}/export/{format}` | Export results as `csv`, `pdf`, or `txt` |
+
+---
+
+## License
+
+This project is developed for institutional academic assessment automation. All model execution remains on-device with zero telemetry.
