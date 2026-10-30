@@ -94,15 +94,15 @@ async def start_pipeline(evaluation_id: str):
     # Pre-flight check: Verify Ollama and model are ready before marking status as processing
     from app.services.unified_vlm_service import get_unified_vlm_service
     vlm_svc = get_unified_vlm_service()
-    logger.info("Pre-flight: Checking Ollama model '%s' (\"Are you up?\")...", vlm_svc.model_name)
+    logger.info("Pre-flight: Checking Ollama model Qwen3-vl:8B (\"Are you up?\")....")
     is_up, ping_latency, ping_reply = await vlm_svc.ping_model()
     if not is_up:
-        logger.error("Pre-flight check failed for model '%s': %s", vlm_svc.model_name, ping_reply)
+        logger.error("Pre-flight check failed for model '%s': %s", " Qwen3-vl:8B", ping_reply)
         raise HTTPException(
             status_code=503,
             detail=(
-                f"Cannot start pipeline: Ollama model '{vlm_svc.model_name}' is not reachable ({ping_reply}). "
-                f"Please ensure Ollama is running (`ollama serve`) and model '{vlm_svc.model_name}' is loaded."
+                f"Cannot start pipeline: Ollama model '{' Qwen3-vl:8B'}' is not reachable ({ping_reply}). "
+                f"Please ensure Ollama is running (`ollama serve`) and model '{" Qwen3-vl:8B"}' is loaded."
             ),
         )
     logger.info("Pre-flight check passed in %.2fs (Ollama runner ready in RAM).", ping_latency)
