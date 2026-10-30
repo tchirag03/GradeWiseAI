@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DragEvent, ChangeEvent } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { get, upload, del } from '@/api/client'
+import { get, post, upload, del } from '@/api/client'
 
 interface SheetInfo {
   id: string
@@ -9,6 +9,9 @@ interface SheetInfo {
   size: number
   status: 'uploading' | 'uploaded' | 'error'
   error?: string
+  page_count?: number
+  is_bundle?: boolean
+  pages?: { page_number: number; file_name: string; file_size: number }[]
 }
 
 interface RubricInfo {
@@ -24,6 +27,9 @@ interface ListSheetsApiResponse {
     file_name: string
     file_size: number
     status: string
+    page_count?: number
+    is_bundle?: boolean
+    pages?: { page_number: number; file_name: string; file_size: number }[]
   }[]
 }
 
@@ -31,6 +37,7 @@ function UploadSheets() {
   const { evaluationId } = useParams<{ evaluationId: string }>()
   const navigate = useNavigate()
   const [uploadedFiles, setUploadedFiles] = useState<SheetInfo[]>([])
+  const [submissionMode, setSubmissionMode] = useState<'single_script' | 'individual_files'>('single_script')
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -52,6 +59,9 @@ function UploadSheets() {
             name: s.file_name,
             size: s.file_size,
             status: 'uploaded' as const,
+            page_count: s.page_count,
+            is_bundle: s.is_bundle,
+            pages: s.pages,
           }))
         )
 
@@ -100,24 +110,25 @@ function UploadSheets() {
         formData.append('files', file)
       })
 
-      const response = await upload<{
+      await upload<{
         success: boolean
-        uploaded_sheets: { sheet_id: string; file_name: string; file_size: number; status: string }[]
+        uploaded_sheets: { sheet_id: string; file_name: string; file_size: number; status: string; page_count?: number; is_bundle?: boolean }[]
         message: string
-      }>(`/evaluations/${evaluationId}/sheets`, formData)
+      }>(`/evaluations/${evaluationId}/sheets?mode=${submissionMode}`, formData)
 
-      // Replace temp entries with real server data
-      setUploadedFiles((prev) => {
-        // Remove the temp entries we just added
-        const withoutTemps = prev.filter((f) => !f.id.startsWith('temp-'))
-        const serverFiles: SheetInfo[] = response.uploaded_sheets.map((s) => ({
-          id: s.sheet_id,
+      // Fetch fresh list from server to get accurate bundle & page counts
+      const sheetsData = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+      setUploadedFiles(
+        sheetsData.sheets.map((s) => ({
+          id: s.id,
           name: s.file_name,
           size: s.file_size,
           status: 'uploaded' as const,
+          page_count: s.page_count,
+          is_bundle: s.is_bundle,
+          pages: s.pages,
         }))
-        return [...withoutTemps, ...serverFiles]
-      })
+      )
     } catch (err: any) {
       // Mark all temp files as errored
       setUploadedFiles((prev) =>
@@ -244,6 +255,49 @@ function UploadSheets() {
     }
   }
 
+
+  const handleBundleAll = async () => {
+    if (!evaluationId) return
+    try {
+      await post(`/evaluations/${evaluationId}/sheets/bundle`, {})
+      const sheetsData = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+      setUploadedFiles(
+        sheetsData.sheets.map((s) => ({
+          id: s.id,
+          name: s.file_name,
+          size: s.file_size,
+          status: 'uploaded' as const,
+          page_count: s.page_count,
+          is_bundle: s.is_bundle,
+          pages: s.pages,
+        }))
+      )
+    } catch (err: any) {
+      console.error('Failed to bundle sheets:', err)
+    }
+  }
+
+  const handleUnbundleAll = async () => {
+    if (!evaluationId) return
+    try {
+      await post(`/evaluations/${evaluationId}/sheets/unbundle`, {})
+      const sheetsData = await get<ListSheetsApiResponse>(`/evaluations/${evaluationId}/sheets`)
+      setUploadedFiles(
+        sheetsData.sheets.map((s) => ({
+          id: s.id,
+          name: s.file_name,
+          size: s.file_size,
+          status: 'uploaded' as const,
+          page_count: s.page_count,
+          is_bundle: s.is_bundle,
+          pages: s.pages,
+        }))
+      )
+    } catch (err: any) {
+      console.error('Failed to unbundle sheets:', err)
+    }
+  }
+
   const realSheets = uploadedFiles.filter((f) => f.status === 'uploaded')
 
   return (
@@ -327,8 +381,53 @@ function UploadSheets() {
 
 
       {/* Answer Sheets Upload Section */}
-      <div className="mb-8">
-        <h2 className="text-xl font-bold text-slate-800 mb-4">Upload Answer Sheets</h2>
+      <div className="mb-6">
+        <h2 className="text-xl font-bold text-slate-800 mb-2">Upload Answer Sheets</h2>
+        <p className="text-sm text-slate-500 mb-4">
+          Choose whether your uploaded files represent one student's multi-page answer script or multiple individual student scripts.
+        </p>
+
+        {/* Submission Mode Selector */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4">
+          <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">
+            Submission Structure
+          </div>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setSubmissionMode('single_script')}
+              className={`p-3.5 rounded-lg border text-left transition-all ${
+                submissionMode === 'single_script'
+                  ? 'border-blue-500 bg-blue-50/80 shadow-xs ring-1 ring-blue-500/20'
+                  : 'border-slate-200 bg-white hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold text-slate-800 text-sm">
+                <span className="text-base">📄</span> Single Student (Multi-Page)
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                Combine all uploaded photos/pages into 1 continuous answer script evaluated together.
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSubmissionMode('individual_files')}
+              className={`p-3.5 rounded-lg border text-left transition-all ${
+                submissionMode === 'individual_files'
+                  ? 'border-blue-500 bg-blue-50/80 shadow-xs ring-1 ring-blue-500/20'
+                  : 'border-slate-200 bg-white hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold text-slate-800 text-sm">
+                <span className="text-base">👥</span> Class Batch (1 File = 1 Student)
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                Each uploaded image or PDF belongs to a separate student.
+              </div>
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Upload Area */}
@@ -393,9 +492,31 @@ function UploadSheets() {
       {uploadedFiles.length > 0 && (
         <div className="mt-8">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-slate-800">
-              Uploaded Files ({realSheets.length})
-            </h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-xl font-bold text-slate-800">
+                Uploaded Scripts ({realSheets.length})
+              </h2>
+              {realSheets.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleBundleAll}
+                  className="text-xs font-semibold px-2.5 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors"
+                  title="Combine all into 1 multi-page script"
+                >
+                  🔗 Combine all into 1 Script
+                </button>
+              )}
+              {realSheets.some((f) => f.is_bundle && f.page_count && f.page_count > 1) && (
+                <button
+                  type="button"
+                  onClick={handleUnbundleAll}
+                  className="text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-700 border border-slate-300 hover:bg-slate-200 transition-colors"
+                  title="Split bundle into individual pages"
+                >
+                  ✂️ Split into Individual Pages
+                </button>
+              )}
+            </div>
             {uploadedFiles.length > 0 && (
               <button
                 onClick={handleClearAll}
@@ -431,9 +552,21 @@ function UploadSheets() {
 
                   {/* File Info */}
                   <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-slate-800 truncate">{file.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold text-slate-800 truncate">{file.name}</p>
+                      {file.is_bundle && file.page_count && file.page_count > 1 && (
+                        <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                          📄 {file.page_count} Pages Combined
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm text-slate-500">
                       {formatFileSize(file.size)}
+                      {file.pages && file.pages.length > 1 && (
+                        <span className="text-slate-400 ml-2">
+                          (Pages: {file.pages.map(p => p.file_name).join(', ')})
+                        </span>
+                      )}
                       {file.status === 'error' && (
                         <span className="text-red-600 ml-2">— Upload failed</span>
                       )}

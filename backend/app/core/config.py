@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "gemma4:e4b"
     image_max_dim: int = 768
-    vlm_max_tokens: int = 8192
+    vlm_num_ctx: int = 49152
+    vlm_max_tokens: int = 24576
 
     # Logging
     log_dir: str = "logs"

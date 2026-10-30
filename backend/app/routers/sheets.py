@@ -89,11 +89,12 @@ def _ensure_upload_dir(evaluation_id: str) -> str:
 async def upload_sheets(
     evaluation_id: str,
     files: list[UploadFile] = File(..., description="One or more answer sheet images/PDFs"),
+    mode: str = "single_script",
 ):
     """Upload answer sheets for a given evaluation.
 
-    • Saves each file to  uploads/<evaluation_id>/
-    • Inserts a metadata document into the MongoDB `sheets` collection
+    • mode='single_script': Combines all uploaded files into 1 multi-page answer script.
+    • mode='individual_files': Saves each uploaded file as an independent student sheet.
     """
     if not ObjectId.is_valid(evaluation_id):
         raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
@@ -104,51 +105,154 @@ async def upload_sheets(
         raise HTTPException(status_code=404, detail="Evaluation not found")
 
     upload_dir = _ensure_upload_dir(evaluation_id)
-    uploaded: list[UploadedSheetInfo] = []
+    saved_files = []
 
+    # Save all files to disk first
     for file in files:
         safe_filename = _sanitize_filename(file.filename, f"sheet_{uuid.uuid4().hex[:6]}.png")
         _validate_extension(safe_filename)
 
-        # Unique file destination if already exists
         dest_path = os.path.join(upload_dir, safe_filename)
         if os.path.exists(dest_path):
             base, ext = os.path.splitext(safe_filename)
             safe_filename = f"{base}_{uuid.uuid4().hex[:6]}{ext}"
             dest_path = os.path.join(upload_dir, safe_filename)
 
-        # Persist to disk
         with open(dest_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         file_size = os.path.getsize(dest_path)
+        saved_files.append({"name": safe_filename, "path": dest_path, "size": file_size})
 
-        # Insert metadata into MongoDB
-        doc = {
+    # Sort files chronologically/alphabetically by filename so pages are in natural order
+    saved_files.sort(key=lambda x: x["name"])
+    uploaded: list[UploadedSheetInfo] = []
+
+    if mode == "single_script" and saved_files:
+        # Check if an existing un-evaluated bundle already exists in this evaluation
+        existing_bundle = await db.sheets.find_one({
             "evaluation_id": evaluation_id,
-            "file_name": safe_filename,
-            "file_size": file_size,
-            "file_path": dest_path,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-            "status": "uploaded",
-            "crops": [],
-            "needs_human_review": False,
-            "review_reasons": [],
-        }
-        result = await db.sheets.insert_one(doc)
+            "is_bundle": True,
+            "status": "uploaded"
+        })
 
-        uploaded.append(
-            UploadedSheetInfo(
-                sheet_id=str(result.inserted_id),
-                file_name=safe_filename,
-                file_size=file_size,
-                status="uploaded",
+        if existing_bundle:
+            # Append new pages to existing bundle
+            current_pages = existing_bundle.get("pages", [])
+            start_num = len(current_pages) + 1
+            for idx, sf in enumerate(saved_files):
+                current_pages.append({
+                    "page_number": start_num + idx,
+                    "file_name": sf["name"],
+                    "file_path": sf["path"],
+                    "file_size": sf["size"],
+                })
+            new_total_size = sum(p.get("file_size", 0) for p in current_pages)
+            first_name = current_pages[0]["file_name"]
+            bundle_display_name = f"{first_name} (+{len(current_pages)-1} pages)"
+
+            await db.sheets.update_one(
+                {"_id": existing_bundle["_id"]},
+                {
+                    "$set": {
+                        "pages": current_pages,
+                        "page_count": len(current_pages),
+                        "file_size": new_total_size,
+                        "file_name": bundle_display_name,
+                    }
+                }
             )
-        )
+            uploaded.append(
+                UploadedSheetInfo(
+                    sheet_id=str(existing_bundle["_id"]),
+                    file_name=bundle_display_name,
+                    file_size=new_total_size,
+                    status="uploaded",
+                    page_count=len(current_pages),
+                    is_bundle=True,
+                )
+            )
+        else:
+            # Create a new combined multi-page script document
+            pages_meta = [
+                {
+                    "page_number": idx + 1,
+                    "file_name": sf["name"],
+                    "file_path": sf["path"],
+                    "file_size": sf["size"],
+                }
+                for idx, sf in enumerate(saved_files)
+            ]
+            first_name = saved_files[0]["name"]
+            bundle_display_name = (
+                f"{first_name} (+{len(saved_files)-1} pages)"
+                if len(saved_files) > 1
+                else first_name
+            )
+            total_size = sum(sf["size"] for sf in saved_files)
+
+            doc = {
+                "evaluation_id": evaluation_id,
+                "file_name": bundle_display_name,
+                "file_size": total_size,
+                "file_path": saved_files[0]["path"],
+                "is_bundle": True,
+                "page_count": len(saved_files),
+                "pages": pages_meta,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "status": "uploaded",
+                "crops": [],
+                "needs_human_review": False,
+                "review_reasons": [],
+            }
+            res = await db.sheets.insert_one(doc)
+            uploaded.append(
+                UploadedSheetInfo(
+                    sheet_id=str(res.inserted_id),
+                    file_name=bundle_display_name,
+                    file_size=total_size,
+                    status="uploaded",
+                    page_count=len(saved_files),
+                    is_bundle=True,
+                )
+            )
+    else:
+        # Individual files mode
+        for sf in saved_files:
+            doc = {
+                "evaluation_id": evaluation_id,
+                "file_name": sf["name"],
+                "file_size": sf["size"],
+                "file_path": sf["path"],
+                "is_bundle": False,
+                "page_count": 1,
+                "pages": [{
+                    "page_number": 1,
+                    "file_name": sf["name"],
+                    "file_path": sf["path"],
+                    "file_size": sf["size"],
+                }],
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "status": "uploaded",
+                "crops": [],
+                "needs_human_review": False,
+                "review_reasons": [],
+            }
+            res = await db.sheets.insert_one(doc)
+            uploaded.append(
+                UploadedSheetInfo(
+                    sheet_id=str(res.inserted_id),
+                    file_name=sf["name"],
+                    file_size=sf["size"],
+                    status="uploaded",
+                    page_count=1,
+                    is_bundle=False,
+                )
+            )
 
     return UploadSheetsResponse(
         success=True,
         uploaded_sheets=uploaded,
-        message=f"{len(uploaded)} sheet(s) uploaded successfully",
+        message=f"{len(saved_files)} file(s) processed in mode '{mode}'",
     )
 
 
@@ -274,6 +378,9 @@ async def list_sheets(evaluation_id: str):
                 error=doc.get("error"),
                 needs_human_review=doc.get("needs_human_review", False),
                 review_reasons=doc.get("review_reasons", []),
+                page_count=doc.get("page_count", len(doc.get("pages", [])) or 1),
+                is_bundle=doc.get("is_bundle", False),
+                pages=doc.get("pages", []),
             )
         )
 
@@ -347,3 +454,104 @@ async def delete_rubric(evaluation_id: str):
         "success": True,
         "message": "Rubric deleted successfully",
     }
+
+# ---------------------------------------------------------------------------
+# POST  /evaluations/{evaluation_id}/sheets/bundle  —  bundle all into 1 script
+# ---------------------------------------------------------------------------
+@router.post("/evaluations/{evaluation_id}/sheets/bundle")
+async def bundle_sheets(evaluation_id: str):
+    """Combines all uploaded sheets in an evaluation into a single multi-page script bundle."""
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
+
+    db = get_database()
+    sheets = await db.sheets.find({"evaluation_id": evaluation_id}).sort("file_name", 1).to_list(100)
+    if not sheets:
+        raise HTTPException(status_code=400, detail="No sheets found to bundle")
+    if len(sheets) == 1 and sheets[0].get("is_bundle"):
+        return {"success": True, "message": "Already a bundle", "sheet_id": str(sheets[0]["_id"])}
+
+    all_pages = []
+    total_size = 0
+    page_num = 1
+    for s in sheets:
+        if s.get("is_bundle") and s.get("pages"):
+            for p in s["pages"]:
+                all_pages.append({
+                    "page_number": page_num,
+                    "file_name": p.get("file_name"),
+                    "file_path": p.get("file_path"),
+                    "file_size": p.get("file_size", 0),
+                })
+                total_size += p.get("file_size", 0)
+                page_num += 1
+        else:
+            all_pages.append({
+                "page_number": page_num,
+                "file_name": s.get("file_name"),
+                "file_path": s.get("file_path"),
+                "file_size": s.get("file_size", 0),
+            })
+            total_size += s.get("file_size", 0)
+            page_num += 1
+
+    first_file = all_pages[0]["file_name"]
+    bundle_name = f"{first_file} (+{len(all_pages)-1} pages)" if len(all_pages) > 1 else first_file
+
+    sheet_ids = [s["_id"] for s in sheets]
+    await db.sheets.delete_many({"_id": {"$in": sheet_ids}})
+
+    doc = {
+        "evaluation_id": evaluation_id,
+        "file_name": bundle_name,
+        "file_size": total_size,
+        "file_path": all_pages[0]["file_path"],
+        "is_bundle": True,
+        "page_count": len(all_pages),
+        "pages": all_pages,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "status": "uploaded",
+        "crops": [],
+        "needs_human_review": False,
+        "review_reasons": [],
+    }
+    result = await db.sheets.insert_one(doc)
+    return {"success": True, "message": f"Successfully bundled {len(all_pages)} pages into 1 script", "sheet_id": str(result.inserted_id)}
+
+
+# ---------------------------------------------------------------------------
+# POST  /evaluations/{evaluation_id}/sheets/unbundle  —  split bundle into pages
+# ---------------------------------------------------------------------------
+@router.post("/evaluations/{evaluation_id}/sheets/unbundle")
+async def unbundle_sheets(evaluation_id: str):
+    """Splits multi-page bundles in the evaluation into separate single-page sheets."""
+    if not ObjectId.is_valid(evaluation_id):
+        raise HTTPException(status_code=400, detail="Invalid evaluation ID format")
+
+    db = get_database()
+    sheets = await db.sheets.find({"evaluation_id": evaluation_id}).to_list(100)
+    unbundled_count = 0
+
+    for s in sheets:
+        if s.get("is_bundle") and s.get("pages") and len(s["pages"]) > 1:
+            pages = s["pages"]
+            await db.sheets.delete_one({"_id": s["_id"]})
+            for p in pages:
+                doc = {
+                    "evaluation_id": evaluation_id,
+                    "file_name": p.get("file_name"),
+                    "file_size": p.get("file_size", 0),
+                    "file_path": p.get("file_path"),
+                    "is_bundle": False,
+                    "page_count": 1,
+                    "pages": [p],
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "uploaded",
+                    "crops": [],
+                    "needs_human_review": False,
+                    "review_reasons": [],
+                }
+                await db.sheets.insert_one(doc)
+                unbundled_count += 1
+
+    return {"success": True, "message": f"Successfully unbundled into {unbundled_count} separate sheets"}

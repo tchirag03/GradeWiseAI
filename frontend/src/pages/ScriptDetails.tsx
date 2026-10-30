@@ -65,6 +65,9 @@ interface ScriptResultDetails {
   grade_boundaries?: { grade: string; min_percentage: number }[]
   error?: string
   status?: string
+  is_bundle?: boolean
+  page_count?: number
+  pages?: { page_number: number; file_name: string; file_size: number }[]
 }
 
 function ScriptDetails() {
@@ -231,6 +234,11 @@ function ScriptDetails() {
               <span className="font-mono text-sm">
                 <span className="font-semibold font-sans text-slate-800">File:</span> {details.student.file_name}
               </span>
+              {(details.is_bundle || (details.page_count && details.page_count > 1)) && (
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                  📄 {details.page_count || details.pages?.length || 2} Pages Evaluated Together
+                </span>
+              )}
             </div>
           </div>
 

@@ -25,6 +25,9 @@ interface ScriptResult {
   top_loss_component?: string
   feedback_summary?: string
   evaluation_method?: string
+  is_bundle?: boolean
+  page_count?: number
+  pages?: Array<{ file_name?: string; page_number?: number }>
 }
 
 interface ResultsOverviewApiResponse {
@@ -335,8 +338,15 @@ function ResultsOverview() {
                       className="hover:bg-blue-50 cursor-pointer transition-colors duration-150 group"
                     >
                       <td className="p-4">
-                        <div className="font-semibold text-slate-800 group-hover:text-blue-700 transition-colors">
-                          {result.student_name}
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-800 group-hover:text-blue-700 transition-colors">
+                            {result.student_name}
+                          </span>
+                          {(result.is_bundle || (result.page_count && result.page_count > 1)) && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200">
+                              📄 {result.page_count || result.pages?.length || 2} Pages
+                            </span>
+                          )}
                         </div>
                         <span className="text-slate-500 font-mono text-xs">{result.file_name}</span>
                         {isFlagged && result.review_reasons && result.review_reasons.length > 0 && (

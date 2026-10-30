@@ -9,6 +9,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import time
 import subprocess
 import traceback
@@ -38,7 +39,8 @@ class UnifiedVLMService:
         self.ollama_url = getattr(settings, "ollama_url", OLLAMA_URL)
         self.model_name = getattr(settings, "ollama_model", MODEL_NAME)
         self.image_max_dim = getattr(settings, "image_max_dim", 768)
-        self.vlm_max_tokens = getattr(settings, "vlm_max_tokens", 8192)
+        self.vlm_num_ctx = getattr(settings, "vlm_num_ctx", 49152)
+        self.vlm_max_tokens = getattr(settings, "vlm_max_tokens", 24576)
         self._inference_lock = asyncio.Lock()
 
     def _get_detached_flags(self) -> int:
@@ -137,6 +139,7 @@ class UnifiedVLMService:
             elapsed = time.time() - start
             return False, elapsed, str(exc)
 
+    @staticmethod
     @staticmethod
     def _resolve_file_path(file_path: str) -> str:
         """Resolve a file path: if relative, resolve against the backend project root."""
@@ -238,8 +241,13 @@ class UnifiedVLMService:
         return rubric_text, components, max_marks, subject
 
     @staticmethod
-    def _parse_json_safely(text: str) -> Optional[dict]:
-        """Robustly extracts and parses a JSON object with schema key verification."""
+    def _repair_json_escapes(raw_str: str) -> str:
+        r"""Fix invalid backslashes (e.g. LaTeX math \min, \sum, \alpha) inside JSON strings."""
+        return re.sub(r'\\(?!([\"\\/bfnrt]|u[0-9a-fA-F]{4}))', r'\\\\', raw_str)
+
+    @classmethod
+    def _parse_json_safely(cls, text: str) -> Optional[dict]:
+        """Robustly extracts and parses a JSON object with schema key verification, including LaTeX math escape repair."""
         if not text:
             return None
         s = text.strip()
@@ -253,15 +261,29 @@ class UnifiedVLMService:
                 lines = lines[:-1]
             s = "\n".join(lines).strip()
 
-        # Direct parse attempt
-        try:
-            d = json.loads(s)
-            if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
-                return d
-        except Exception:
-            pass
+        def _try_load(chunk: str) -> Optional[dict]:
+            for candidate in (chunk, cls._repair_json_escapes(chunk)):
+                try:
+                    d = json.loads(candidate, strict=False)
+                    if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                        return d
+                except Exception:
+                    pass
+                for extra in ["}", "\n}", "\n}\n}", '"}]}', '"}']:
+                    try:
+                        d = json.loads(candidate + extra, strict=False)
+                        if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
+                            return d
+                    except Exception:
+                        pass
+            return None
 
-        # Targeted extraction: locate start of target JSON by searching backwards for schema keys
+        # 1. Direct parse attempt
+        d = _try_load(s)
+        if d:
+            return d
+
+        # 2. Targeted extraction: locate start of target JSON by searching backwards for schema keys
         target_keys = ['"rubric_breakdown"', '"transcription"', '"total_score"', '"student_name"']
         for key in target_keys:
             idx = s.rfind(key)
@@ -272,30 +294,17 @@ class UnifiedVLMService:
                     end_brace = candidate.rfind('}')
                     if end_brace != -1:
                         chunk = candidate[:end_brace + 1]
-                        try:
-                            d = json.loads(chunk)
-                            if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
-                                return d
-                        except Exception:
-                            for extra in ["}", "\n}", "\n}\n}", '"}]}', '"}']:
-                                try:
-                                    d = json.loads(chunk + extra)
-                                    if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
-                                        return d
-                                except Exception:
-                                    pass
+                        d = _try_load(chunk)
+                        if d:
+                            return d
                 idx = s.rfind(key, 0, idx)
 
-        # Generic regex search for any balanced JSON object with target keys
-        import re
+        # 3. Generic regex search for any balanced JSON object with target keys
         matches = list(re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', s))
         for m in reversed(matches):
-            try:
-                d = json.loads(m.group(0))
-                if isinstance(d, dict) and any(k in d for k in ("rubric_breakdown", "transcription", "total_score")):
-                    return d
-            except Exception:
-                pass
+            d = _try_load(m.group(0))
+            if d:
+                return d
 
         return None
 
@@ -381,11 +390,21 @@ class UnifiedVLMService:
             level="info",
         )
 
-        # Step 4: Encode image and call VLM
-        b64_img = self.prepare_image_b64(resolved_path, max_dim=self.image_max_dim)
+        # Step 4: Encode image(s) and call VLM
+        pages = sheet.get("pages")
+        if not pages:
+            pages = [{"file_name": file_name, "file_path": file_path, "page_number": 1}]
+
+        b64_imgs = []
+        for p in pages:
+            p_path = self._resolve_file_path(p.get("file_path", file_path))
+            b64_imgs.append(self.prepare_image_b64(p_path, max_dim=self.image_max_dim))
+
+        total_b64_kb = sum(len(b) for b in b64_imgs) * 3 // 4 // 1024
         existing_student_name = sheet.get("student_name", "")
-        logger.info("[Sheet %s] Step 4/5: Image encoded (%d bytes b64, ~%d KB). Sending to Ollama %s...",
-                     sheet_id, len(b64_img), len(b64_img) * 3 // 4 // 1024, self.model_name)
+        page_count = len(b64_imgs)
+        logger.info("[Sheet %s] Step 4/5: %d page(s) encoded (~%d KB total). Sending to Ollama %s...",
+                     sheet_id, page_count, total_b64_kb, self.model_name)
         logger.info("[Sheet %s] (Processing on local CPU, ~60-90s per sheet...)",
                      sheet_id)
 
@@ -393,17 +412,17 @@ class UnifiedVLMService:
         await publish_event(
             evaluation_id=evaluation_id,
             event_type="vlm_dispatch",
-            message=f"[{file_name}] Image encoded ({len(b64_img) // 1024} KB). Submitting to {self.model_name}...",
-            data={"sheet_id": sheet_id, "file_name": file_name, "model": self.model_name},
+            message=f"[{file_name}] {page_count} page(s) encoded (~{total_b64_kb} KB). Submitting to {self.model_name}...",
+            data={"sheet_id": sheet_id, "file_name": file_name, "model": self.model_name, "page_count": page_count},
             level="info",
         )
 
         # Acquire lock to ensure single-job execution on CPU to avoid timeouts and thrashing
         start_time = time.time()
         async with self._inference_lock:
-            logger.info("[Sheet %s] Inference lock acquired. Calling Ollama /api/generate...", sheet_id)
+            logger.info("[Sheet %s] Inference lock acquired. Calling Ollama /api/generate (%d page(s))...", sheet_id, page_count)
             result = await self._call_vlm(
-                b64_img=b64_img,
+                b64_imgs=b64_imgs,
                 rubric_text=rubric_text,
                 file_name=file_name,
                 sheet_student_name=existing_student_name,
@@ -464,6 +483,9 @@ class UnifiedVLMService:
             "review_reasons": review_reasons,
             "ocr_confidence": 0.95,
             "crops": result.get("crops", sheet.get("crops", [])),
+            "pages": pages,
+            "page_count": len(pages),
+            "is_bundle": sheet.get("is_bundle", len(pages) > 1),
             "evaluation_completed_at": datetime.now(timezone.utc).isoformat(),
             "error": None,
         }
@@ -485,7 +507,7 @@ class UnifiedVLMService:
 
     async def _call_vlm(
         self,
-        b64_img: str,
+        b64_imgs: List[str] | str,
         rubric_text: str,
         file_name: str,
         sheet_student_name: str,
@@ -495,23 +517,34 @@ class UnifiedVLMService:
         logger: Optional[Any] = None,
         sheet_id: str = "",
     ) -> Dict[str, Any]:
-        """Invokes local Qwen3-VL via Ollama with strict JSON enforcement."""
+        """Invokes local VLM via Ollama with strict JSON enforcement across all submission pages."""
+        if isinstance(b64_imgs, str):
+            b64_imgs = [b64_imgs]
+
+        page_count = len(b64_imgs)
+        page_directive = (
+            f"Evaluate this complete {page_count}-page handwritten examination answer script "
+            f"(Page 1 through Page {page_count}) accurately against the official rubric from beginning to end."
+            if page_count > 1 else
+            "Evaluate this handwritten student examination answer sheet image accurately against the official rubric."
+        )
+
         prompt = f"""You are an Expert University Professor and Precision Academic Grading System for: {subject}.
-Evaluate this handwritten student examination answer sheet image accurately against the official rubric.
+{page_directive}
 
 ### OFFICIAL GRADING RUBRIC:
 {rubric_text}
 
 ### MANDATORY INSTRUCTIONS:
-1. Complete verbatim transcription of all handwritten text, formulas, steps, and pseudocode from top to bottom (do not summarize or condense).
+1. Complete verbatim transcription of all handwritten text, formulas, steps, and pseudocode across all {page_count} page(s) from top to bottom (do not summarize or condense).
 2. Grade every rubric component with marks awarded, exact student evidence quote, detailed explainability feedback, and expected answer.
-3. In "evaluator_rationale", provide an in-depth 3-5 sentence academic assessment summary explaining strengths, gaps, and exact justification for total score awarded.
+3. In "evaluator_rationale", provide an in-depth 3-5 sentence academic assessment summary explaining strengths, gaps, and exact justification for total score awarded across the full submission.
 4. STRICT THINKING CONSTRAINT: Keep internal reasoning concise (under 100-150 words). Do not rewrite the prompt or transcribe the code in thinking. Quickly check criteria and immediately output the final JSON object.
 
 Return ONLY a valid JSON object matching this schema:
 {{
   "student_name": "Student Name (e.g. Nithin) or empty string",
-  "transcription": "Complete verbatim markdown transcription of the handwritten answer sheet from top to bottom, including all text, steps, and full pseudocode",
+  "transcription": "Complete verbatim markdown transcription of the handwritten answer sheet across all pages from top to bottom, including all text, steps, and full pseudocode",
   "diagram_description": "Structural description of hand-drawn diagrams, or empty string",
   "rubric_breakdown": [
     {{
@@ -535,11 +568,11 @@ Return ONLY a valid JSON object matching this schema:
         req_payload = {
             "model": self.model_name,
             "prompt": prompt,
-            "images": [b64_img],
+            "images": b64_imgs,
             "options": {
                 "num_thread": 10,
                 "temperature": 0.6,
-                "num_ctx": 16384,
+                "num_ctx": self.vlm_num_ctx,
                 "num_predict": self.vlm_max_tokens,
             },
             "stream": False,
@@ -547,12 +580,13 @@ Return ONLY a valid JSON object matching this schema:
 
         timeout_sec = 600.0  # 10 minutes per sheet for local CPU inference
         _log = logger.info if logger else print
+        total_kb = sum(len(b) for b in b64_imgs) * 3 // 4 // 1024
 
         try:
             async with httpx.AsyncClient(timeout=timeout_sec) as client:
-                _log("[Sheet %s] POST %s/api/generate (model=%s, timeout=%ds, prompt=%d chars, image=%d KB)",
+                _log("[Sheet %s] POST %s/api/generate (model=%s, timeout=%ds, prompt=%d chars, %d page(s), total=%d KB)",
                      sheet_id, self.ollama_url, self.model_name, int(timeout_sec),
-                     len(prompt), len(b64_img) * 3 // 4 // 1024)
+                     len(prompt), page_count, total_kb)
                 resp = await client.post(f"{self.ollama_url}/api/generate", json=req_payload)
         except httpx.TimeoutException as exc:
             if logger:
@@ -643,6 +677,20 @@ Return ONLY a valid JSON object matching this schema:
 
         # Dynamic student name resolution
         student_name = data.get("student_name", "").strip()
+        transcription = data.get("transcription", "")
+        is_generic = (
+            not student_name
+            or student_name.lower() in ("student", "unknown", "n/a", "none")
+            or student_name.startswith("IMG_")
+            or student_name == os.path.splitext(file_name)[0]
+        )
+        if is_generic and transcription:
+            m = re.search(r"Name(?:\s+of\s+the\s+Candidate)?\s*:\s*([A-Za-z\s]+?)(?=\n\s*(?:USN|Signature|Date|Course|Marks)|\n\n)", transcription, re.IGNORECASE)
+            if m:
+                extracted = " ".join(m.group(1).split())
+                if len(extracted) >= 2:
+                    student_name = extracted
+
         if not student_name or student_name.lower() in ("student", "unknown", "n/a", "none"):
             student_name = sheet_student_name or os.path.splitext(file_name)[0]
 

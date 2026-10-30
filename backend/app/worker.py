@@ -45,13 +45,15 @@ async def process_sheet_extraction(ctx, evaluation_id: str, sheet_id: str, run_i
 
     logger = get_run_logger(evaluation_id, run_id)
     file_name = sheet.get("file_name", "unknown")
-    logger.info(">>> Processing sheet %s [File: %s]...", sheet_id, file_name)
+    page_count = sheet.get("page_count", len(sheet.get("pages", [])) or 1)
+    page_info = f" ({page_count} pages)" if page_count > 1 else ""
+    logger.info(">>> Processing sheet %s [File: %s%s]...", sheet_id, file_name, page_info)
 
     await publish_event(
         evaluation_id=evaluation_id,
         event_type="sheet_start",
-        message=f"Starting perception & evaluation for '{file_name}'...",
-        data={"sheet_id": sheet_id, "file_name": file_name},
+        message=f"Starting perception & evaluation for '{file_name}'{page_info}...",
+        data={"sheet_id": sheet_id, "file_name": file_name, "page_count": page_count},
         level="info",
     )
 
@@ -80,7 +82,7 @@ async def process_sheet_extraction(ctx, evaluation_id: str, sheet_id: str, run_i
         await publish_event(
             evaluation_id=evaluation_id,
             event_type="sheet_completed",
-            message=f"✓ Graded '{file_name}': {total_score:.1f}/{max_score} (Grade: {grade})" + (" [Needs Human Review]" if needs_review else ""),
+            message=f"✓ Graded '{file_name}'{page_info}: {total_score:.1f}/{max_score} (Grade: {grade})" + (" [Needs Human Review]" if needs_review else ""),
             data={
                 "sheet_id": sheet_id,
                 "file_name": file_name,
@@ -89,6 +91,7 @@ async def process_sheet_extraction(ctx, evaluation_id: str, sheet_id: str, run_i
                 "max_score": max_score,
                 "grade": grade,
                 "needs_review": needs_review,
+                "page_count": page_count,
             },
             level="warning" if needs_review else "success",
         )

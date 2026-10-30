@@ -57,6 +57,8 @@ class UploadedSheetInfo(BaseModel):
     file_name: str
     file_size: int
     status: SheetStatus = "uploaded"
+    page_count: int = 1
+    is_bundle: bool = False
 
 
 class UploadSheetsResponse(BaseModel):
@@ -78,6 +80,12 @@ class SheetMetadata(BaseModel):
     needs_human_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
     error: str | None = None
+    page_count: int = 1
+    is_bundle: bool = False
+    pages: list[dict] = Field(default_factory=list)
+    page_count: int = 1
+    is_bundle: bool = False
+    pages: list[dict] = Field(default_factory=list)
 
 
 class ListSheetsResponse(BaseModel):
